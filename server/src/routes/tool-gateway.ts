@@ -194,7 +194,7 @@ async function handleMcpGatewayProtocol(
         ? result.result as Record<string, unknown>
         : null;
       const toolError = typeof resultRecord?.error === "string" ? resultRecord.error : null;
-      const contentText = toolError
+      const contentText = toolError !== null && toolError.length > 0
         ? toolError
         : typeof resultRecord?.content === "string"
         ? resultRecord.content
@@ -209,7 +209,7 @@ async function handleMcpGatewayProtocol(
         result: {
           content: [{ type: "text", text: contentText }],
           ...(structuredContent === undefined ? {} : { structuredContent }),
-          isError: Boolean(toolError),
+          isError: toolError !== null,
         },
       });
       return;
