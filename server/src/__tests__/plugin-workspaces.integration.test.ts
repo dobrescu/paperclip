@@ -41,19 +41,20 @@ const support = await getEmbeddedPostgresTestSupport();
       await db?.$client.end();
       await stopDb?.();
     });
-    async function fixture() {
-      const companyId = randomUUID(),
+    async function fixture(existingCompanyId?: string) {
+      const companyId = existingCompanyId ?? randomUUID(),
         agentId = randomUUID(),
         projectId = randomUUID(),
         sourceId = randomUUID(),
         pluginId = randomUUID(),
         issueId = randomUUID(),
         runId = randomUUID();
-      await db.insert(companies).values({
-        id: companyId,
-        name: "Storage fixture",
-        issuePrefix: companyId.slice(0, 8).toUpperCase(),
-      });
+      if (!existingCompanyId)
+        await db.insert(companies).values({
+          id: companyId,
+          name: "Storage fixture",
+          issuePrefix: companyId.slice(0, 8).toUpperCase(),
+        });
       await db.insert(agents).values({
         id: agentId,
         companyId,
@@ -670,6 +671,60 @@ const support = await getEmbeddedPostgresTestSupport();
         strategy: "project_primary",
         branchName: null,
       });
+    });
+    it("does not share inspection results across opaque references owned by different providers", async () => {
+      const first = await fixture(),
+        second = await fixture(first.companyId);
+      for (const f of [first, second]) {
+        const workers = {
+          getWorker: f.workers.getWorker.bind(f.workers),
+          call: async (...args: any[]) => {
+            const result = await (f.workers.call as any)(...args);
+            return result.kind === "prepared"
+              ? {
+                  ...result,
+                  binding: { ...result.binding, workspaceRef: "opaque" },
+                }
+              : result;
+          },
+        } as unknown as WorkspaceWorkers;
+        await preparePluginWorkspace(db, workers, f.input);
+        await db
+          .update(issues)
+          .set({ status: "done", completedAt: new Date() })
+          .where(eq(issues.id, f.issueId));
+        await db
+          .update(heartbeatRuns)
+          .set({ status: "cancelled" })
+          .where(eq(heartbeatRuns.id, f.runId));
+      }
+      second.dirty();
+      const workers = {
+        getWorker: (id: string) =>
+          [first.pluginId, second.pluginId].includes(id)
+            ? { supportedMethods: ["workspaceOperation"] }
+            : undefined,
+        call: (id: string, ...args: any[]) =>
+          (
+            (id === first.pluginId ? first.workers : second.workers).call as any
+          )(id, ...args),
+      } as unknown as WorkspaceWorkers;
+      await executionWorkspaceService(db, {
+        pluginWorkerManager: workers,
+        workspaceReaperCooldownDays: 0,
+      }).sweepTerminalWorkspaces(100);
+      const [task] = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, second.issueId));
+      const [retained] = await db
+        .select()
+        .from(executionWorkspaces)
+        .where(eq(executionWorkspaces.id, task.executionWorkspaceId!));
+      expect(retained.status).toBe("active");
+      expect(
+        second.calls.some((call) => call.operation.kind === "inspect"),
+      ).toBe(true);
     });
     it("never removes a checkout with local-only changes", async () => {
       const f = await fixture();

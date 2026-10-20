@@ -3394,7 +3394,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         const createdByRuntime = workspace.providerType === "git_worktree"
           ? isRuntimeOwnedGitBranch(workspace.metadata)
           : workspace.metadata?.createdByRuntime === true;
-        const readinessKey = workspacePath
+        const readinessKey = workspace.providerType === "plugin" ? `plugin:${workspace.id}:${readExecutionWorkspaceLifecycleGeneration(workspace.metadata)}` : workspacePath
           ? JSON.stringify([workspace.companyId, workspacePath, workspace.baseRef, workspace.branchName, createdByRuntime])
           : `workspace:${workspace.id}`;
         let inspection = readinessByWorkingTree.get(readinessKey);
