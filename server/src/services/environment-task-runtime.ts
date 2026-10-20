@@ -1,6 +1,7 @@
+import { readWorkspaceProviderBinding } from "@paperclipai/shared";
 import { settlePluginTaskCredentialHandoff } from "./plugin-task-credential-writeback.js";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
-import { environmentLeases, environments, heartbeatRuns, issues, projects, type Db } from "@paperclipai/db";
+import { environmentLeases, executionWorkspaces, environments, heartbeatRuns, issues, projects, type Db } from "@paperclipai/db";
 import { environmentTaskOperationSchema, parseEnvironmentTaskResult, type PluginEnvironmentTaskOperation } from "@paperclipai/plugin-sdk";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped } from "./remote-execution-termination.js";
@@ -79,6 +80,18 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
   const issue = launches && lease.issueId ? await db.select({ id: issues.id }).from(issues)
     .where(and(eq(issues.id, lease.issueId), eq(issues.companyId, input.companyId))).limit(1).then(rows => rows[0]) : null;
   if (launches && lease.issueId && !issue) throw new Error("Plugin-provided Runner execution issue unavailable");
+  const workspaceBinding = readWorkspaceProviderBinding(lease.metadata);
+  if (metadata.workspaceProvider !== undefined && !workspaceBinding) throw new Error("Invalid managed workspace binding");
+  if (workspaceBinding) {
+    const [workspace] = await db.select().from(executionWorkspaces).where(and(
+      eq(executionWorkspaces.id, workspaceBinding.executionWorkspaceId), eq(executionWorkspaces.companyId, input.companyId)));
+    const saved = readWorkspaceProviderBinding(workspace?.metadata);
+    if (!workspace || workspace.id !== lease.executionWorkspaceId || workspace.providerType !== "plugin" || workspace.providerRef !== workspaceBinding.workspaceRef ||
+        (launches && !["active", "idle", "in_review"].includes(workspace.status)) ||
+        workspaceBinding.pluginId !== plugin.id || !saved || JSON.stringify(saved) !== JSON.stringify(workspaceBinding)) {
+      throw new Error("Managed workspace execution binding changed");
+    }
+  }
   const projectIds = launches ? operation.projectIds : [];
   if (projectIds.length > 0) {
     const authorizedProjects = await db.select({ id: projects.id }).from(projects)
@@ -119,7 +132,8 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
       driverKey: metadata.driverKey, companyId: input.companyId, environmentId: environment?.id ?? null,
       issueId: lease.issueId, config: driverConfig,
       taskId, runId: run?.id ?? (activeProbe ? String(probe.runId) : null), agentId: run?.agentId ?? null, projectIds,
-      lease: { providerLeaseId: lease.providerLeaseId, metadata: lease.metadata ?? undefined }, operation,
+      lease: { providerLeaseId: lease.providerLeaseId, metadata: lease.metadata ?? undefined },
+      ...(workspaceBinding ? { workspace: workspaceBinding } : {}), operation,
     }, 15_000);
     const parsed = parseEnvironmentTaskResult(operation, taskId, result);
     if (parsed.kind === "status" && parsed.executionStopped === true) {

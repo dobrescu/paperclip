@@ -97,6 +97,7 @@ export const executionWorkspaceCloseGitReadinessSchema = z.object({
   behindCount: z.number().int().nonnegative().nullable(),
   isMergedIntoBase: z.boolean().nullable(),
   createdByRuntime: z.boolean(),
+  headSha: z.string().nullable().optional(),
 }).strict();
 
 export const workspaceRuntimeServiceSchema = z.object({

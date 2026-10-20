@@ -1305,3 +1305,57 @@ An `appShellOverlay` slot uses `ui.action.register` and the standard
 `PluginWidgetProps` context. It survives navigation and unmounts on account or
 company changes, sign-out and onboarding. Plugins own panel accessibility and
 request cleanup. See [the distribution and lifecycle contract](../../../doc/plugins/DISTRIBUTION-PLUGINS.md).
+
+## Project storage and task workspaces
+
+A storage provider declares `workspaceProvider: true`, `workspaces.manage`, and
+`resourceLifecycle: ["project"]` (with `events.subscribe`). The same plugin must
+implement `onResourceLifecycle` and `onWorkspaceOperation`. Project lifecycle
+creates and retains the storage; workspace operations manage task checkouts in
+that storage. Execution remains a separate environment driver contract.
+
+Set `project.executionWorkspacePolicy.storageProviderPluginId` to the installed
+plugin's UUID. Core then reserves an execution-workspace row and binds the task
+before it calls `onWorkspaceOperation`. Projects without this setting keep their
+current local behavior. Existing managed workspaces retain their original owner.
+
+The hook receives a company, project, source revision, execution-workspace ID,
+lifecycle generation, deadline, and stable operation ID. Run and agent IDs are
+optional context. A storage hook must work without an environment lease, a live
+agent, or a filesystem mount on Core. It must reconcile ambiguous retries before
+repeating side effects. Use the workspace ID and generation to fence provider
+operations; the operation ID identifies a retry of the same request.
+
+- `prepare` creates or restores the checkout. It returns an opaque, durable
+  `WorkspaceProviderBinding`, a branch, and the starting commit. `branchMode:
+  "existing"` must never create or reset a branch. Retried preparation must keep
+  local work. Providers may reject modes or strategies they do not support.
+- `inspect` reports tracked, untracked, and ignored/local-only changes, the
+  current commit, merge state, and whether remote storage can recover it. Use
+  `null` when a remote recovery or merge check is unknown.
+- `remove` checks the expected commit again and confirms removal. Busy, failed,
+  unsafe, and uncertain removal must throw. Core requires a clean checkout and
+  affirmative remote recovery or merge evidence before requesting removal.
+
+References contain the installed plugin ID, project/source/workspace IDs, source
+revision, and opaque provider coordinates. They must not contain secrets. Core
+stores no local `cwd` for managed rows. `/workspaces/<id>` is a logical path in
+Core's existing run metadata; Core must not use it for filesystem access.
+
+For the initial execution integration, select a task-capable environment driver
+from the same plugin. Core pins the binding on the environment lease and supplies
+it as `PluginEnvironmentTaskParams.workspace`. The execution hook resolves the
+provider reference to guest mounts and the actual working directory. Core rejects
+an execution driver from a different plugin. Native execution also requires the
+plugin Runner task bridge; Core refuses to fall back to a host Runner when that
+bridge is unavailable. This does not require merging the
+storage and execution interfaces.
+
+Core's existing archive, reopen, and terminal cleanup fences also cover provider
+workspaces. The plugin must prevent project storage retirement while its task
+workspaces still contain local data. Repository source and storage owner changes
+are blocked while retained managed workspaces depend on them. File browsing and
+other Core-host filesystem operations are unavailable for managed storage.
+
+Use `createWorkspaceProviderHarness` from `@paperclipai/plugin-sdk/testing` to
+validate hook inputs and outputs without allocating an execution environment.

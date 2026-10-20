@@ -2832,3 +2832,5 @@ export { HUMAN_TASK_ORIGIN_KINDS, isAgentCreatedIssue, type IssueCreationSourceF
 export * from "./grok-bot.js";
 export * from "./agent-observability.js";
 export * from "./prompt-injection-prevention.js";
+
+export * from "./workspace-provider.js";

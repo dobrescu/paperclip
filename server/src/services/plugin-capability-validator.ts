@@ -134,6 +134,7 @@ const OPERATION_CAPABILITIES: Record<string, readonly PluginCapability[]> = {
   "agent.tools.execute": ["agent.tools.register"],
 
   // Environment runtime drivers
+  "workspace.operation": ["workspaces.manage"],
   "environment.validateConfig": ["environment.drivers.register"],
   "environment.probe": ["environment.drivers.register"],
   "environment.acquireLease": ["environment.drivers.register"],
@@ -206,6 +207,7 @@ const FEATURE_CAPABILITIES: Record<string, PluginCapability> = {
   webhooks: "webhooks.receive",
   database: "database.namespace.migrate",
   environmentDrivers: "environment.drivers.register",
+  workspaceProvider: "workspaces.manage",
   agents: "agents.managed",
   projects: "projects.managed",
   routines: "routines.managed",

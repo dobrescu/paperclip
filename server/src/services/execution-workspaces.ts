@@ -1,3 +1,4 @@
+import { inspectPluginWorkspace, removePluginWorkspace, restorePluginWorkspace, type WorkspaceWorkers } from "./plugin-workspaces.js";
 import { measureRunTransaction } from "./execution-transaction-timing.js";
 import { measureRunPhase } from "./execution-preparation-timing.js";
 import { assertExecutionWorkspaceRecordAccess, assertTaskWorkspaceExecutionAccess, assertTaskWorkspaceSourceProjectAccess } from "./task-workspace-access.js";
@@ -251,12 +252,24 @@ async function acquireExecutionWorkspaceLifecycleLock(
   );
 }
 
-const workspaceSourceKeys = ["cwd", "projectId", "projectWorkspaceId", "sourceIssueId"] as const;
+const workspaceSourceKeys = ["providerType", "cwd", "providerRef", "projectId", "projectWorkspaceId", "sourceIssueId", "mode", "strategyType", "branchName", "repoUrl", "baseRef"] as const;
 
 function preserveWorkspaceMetadataForPatch(
   current: typeof executionWorkspaces.$inferSelect, patch: Partial<typeof executionWorkspaces.$inferInsert>,
 ) {
   const nextPatch = { ...patch };
+  if (current.providerType === "plugin") {
+    for (const key of workspaceSourceKeys) {
+      if (patch[key] !== undefined && patch[key] !== current[key]) throw conflict("Managed workspace coordinates belong to its storage plugin");
+    }
+    if (patch.metadata !== undefined) {
+      nextPatch.metadata = { ...patch.metadata };
+      for (const key of ["workspaceProvider", "workspaceProviderOwner", "workspaceProviderSource", "workspaceProviderBaseSha", "workspaceProviderRemoved", "workspaceProviderBranchMode", "lifecycleGeneration", "reopenPendingConsumption", "reopenPendingConsumptionSince"] as const) {
+        if (current.metadata?.[key] !== undefined) nextPatch.metadata[key] = current.metadata[key];
+        else delete nextPatch.metadata[key];
+      }
+    }
+  }
   const retainedSources = {
     ...parseObject(parseObject(patch.metadata)._issuePrivacySources),
     ...parseObject(current.metadata?._issuePrivacySources),
@@ -266,7 +279,7 @@ function preserveWorkspaceMetadataForPatch(
   }
   if (Object.keys(retainedSources).length > 0) {
     nextPatch.metadata = {
-      ...(patch.metadata !== undefined ? patch.metadata ?? {} : current.metadata ?? {}),
+      ...(nextPatch.metadata !== undefined ? nextPatch.metadata ?? {} : current.metadata ?? {}),
       _issuePrivacySources: retainedSources,
     };
   }
@@ -285,6 +298,7 @@ export type ReopenClosedIsolatedExecutionWorkspaceResult =
   | { ok: false; code: "not_reopenable" | "rebuild_failed"; message: string };
 
 export type ExecutionWorkspaceServiceOptions = {
+  pluginWorkerManager?: WorkspaceWorkers;
   gitCacheExpirationEnabled?: boolean;
   gitBaseExpirationEnabled?: boolean;
   gitCacheExpirationDryRun?: boolean;
@@ -1382,6 +1396,21 @@ const WORKSPACE_COMPACTION_TRASH_STALE_MS = 60 * 60 * 1000;
 const WORKSPACE_COMPACTION_TRASH_PURGE_INTERVAL_MS = 30 * 60 * 1000;
 
 export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServiceOptions = {}) {
+  async function inspectWorkspace(workspace: ExecutionWorkspace) {
+    if (workspace.providerType !== "plugin") return inspectGitCloseReadiness(workspace);
+    const [row] = await db.select().from(executionWorkspaces).where(and(eq(executionWorkspaces.id, workspace.id), eq(executionWorkspaces.companyId, workspace.companyId)));
+    if (!row) throw notFound("Workspace is unavailable");
+    const state = await inspectPluginWorkspace(db, opts.pluginWorkerManager, row);
+    return { statusInspectionSucceeded: true, warnings: [], git: {
+      repoRoot: `/workspaces/${workspace.id}`, workspacePath: `/workspaces/${workspace.id}`,
+      branchName: state.branchName, baseRef: workspace.baseRef,
+      hasDirtyTrackedFiles: state.hasDirtyTrackedFiles || state.hasLocalOnlyData,
+      hasUntrackedFiles: state.hasUntrackedFiles, dirtyEntryCount: state.hasDirtyTrackedFiles ? 1 : 0,
+      untrackedEntryCount: state.hasUntrackedFiles ? 1 : 0, aheadCount: null, behindCount: null,
+      isMergedIntoBase: state.isMergedIntoBase, createdByRuntime: workspace.metadata?.createdByRuntime === true,
+      headSha: state.headSha,
+    } };
+  }
   async function resolveSourceWorkspaceConfiguration(input: {
     companyId: string; issueId?: string | null; assigneeAgentId?: string | null;
     assigneeAdapterOverrides?: unknown; executionWorkspaceSettings?: unknown;
@@ -1796,7 +1825,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     }
     let mergedPullRequest = false;
     let pullRequestStateUnknown = false;
-    const workspaceHeadSha = sourceIssueTerminal && git?.repoRoot && git.workspacePath
+    const workspaceHeadSha = workspace.providerType === "plugin" ? git?.headSha ?? null : sourceIssueTerminal && git?.repoRoot && git.workspacePath
       ? await runGit(["rev-parse", "HEAD"], git.workspacePath)
         .then((result) => result.stdout.trim() || null)
         .catch(() => null)
@@ -1874,7 +1903,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     }
 
     const [current, currentHeadSha, currentBranchName] = await Promise.all([
-      inspectGitCloseReadiness(toExecutionWorkspace(workspace)),
+      inspectWorkspace(toExecutionWorkspace(workspace)),
       readGitStdout(["rev-parse", "HEAD"], workspacePath).catch(() => null),
       readGitStdout(["symbolic-ref", "--quiet", "--short", "HEAD"], workspacePath).catch(() => null),
     ]);
@@ -2297,6 +2326,11 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   }
 
   async function runTerminalWorkspaceCleanup(workspace: ExecutionWorkspaceRow, expectedHeadSha: string | null) {
+    if (workspace.providerType === "plugin") {
+      if (await workspaceHasActiveRun(workspace)) throw conflict("Workspace still has active execution");
+      await removePluginWorkspace(db, opts.pluginWorkerManager, workspace, expectedHeadSha);
+      return { cleaned: true, warnings: [] };
+    }
     const [
       {
         acquireGitWorktreeCleanupLock,
@@ -2959,7 +2993,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         git,
         warnings: gitWarnings,
         statusInspectionSucceeded,
-      } = await inspectGitCloseReadiness(executionWorkspace);
+      } = await inspectWorkspace(executionWorkspace);
       const { deliveryState } = await assessDelivery(workspace, git);
       const warnings = [...gitWarnings];
       const blockingReasons: string[] = [];
@@ -3305,7 +3339,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             );
           }
         }
-        if (opts.gitCacheExpirationEnabled && (hasPendingGitExpiration(workspace)
+        if (workspace.providerType !== "plugin" && opts.gitCacheExpirationEnabled && (hasPendingGitExpiration(workspace)
           || (workspace.mode === "isolated_workspace" && workspace.strategyType === "git_worktree"))) {
           const expiration = await expireReconstructableGitWorkspace(db, workspace, {
             dryRun: opts.gitCacheExpirationDryRun ?? false, expireBase: opts.gitBaseExpirationEnabled ?? false,
@@ -3356,7 +3390,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           : `workspace:${workspace.id}`;
         let inspection = readinessByWorkingTree.get(readinessKey);
         if (!inspection) {
-          inspection = inspectGitCloseReadiness(toExecutionWorkspace(workspace));
+          inspection = inspectWorkspace(toExecutionWorkspace(workspace));
           readinessByWorkingTree.set(readinessKey, inspection);
         }
         const { git, statusInspectionSucceeded } = await inspection;
@@ -3718,6 +3752,28 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         return { ok: false, code: "not_reopenable", message: "Execution workspace source changed during reopen" };
       }
       const snapshot = freshSnapshot;
+      if (snapshot.providerType === "plugin") {
+        return db.transaction(async tx => {
+          await acquireExecutionWorkspaceLifecycleLock(tx, snapshot.id);
+          const [row] = await tx.select().from(executionWorkspaces).where(and(
+            eq(executionWorkspaces.id, snapshot.id), eq(executionWorkspaces.companyId, issue.companyId)));
+          if (!row || row.sourceIssueId !== sourceIssueId) return { ok: false, code: "not_reopenable", message: "Workspace source changed" };
+          await assertTaskWorkspaceExecutionAccess(tx, input.authorizationActor, issue.companyId, { issueId: issue.id, workspaceId: row.id });
+          const generation = readExecutionWorkspaceLifecycleGeneration(row.metadata);
+          if (!isClosedExecutionWorkspaceStatus(row.status)) return { ok: true, reopened: false, workspace: toExecutionWorkspace(row), generation };
+          try {
+            const metadata = await restorePluginWorkspace(tx as unknown as Db, opts.pluginWorkerManager, row);
+            const [active] = await tx.update(executionWorkspaces).set({ status: "active", closedAt: null,
+              cleanupReason: null, cleanupEligibleAt: null, lastUsedAt: now(), updatedAt: now(),
+              metadata: setMetadataReopenPendingConsumption(bumpExecutionWorkspaceLifecycleGeneration(metadata), now()),
+            }).where(eq(executionWorkspaces.id, row.id)).returning();
+            await notifyTerminalWorkspaceWork(tx, `workspace:${row.id}`);
+            return { ok: true, reopened: true, workspace: toExecutionWorkspace(active!), generation: generation + 1 };
+          } catch {
+            return { ok: false, code: "rebuild_failed", message: "Workspace storage restoration is incomplete; retry reopening" };
+          }
+        });
+      }
       await assertTaskWorkspaceExecutionAccess(db, input.authorizationActor, issue.companyId, { issueId: issue.id, workspaceId: snapshot.id });
       let recipe: ReturnType<typeof readGitCacheRestoration>;
       try { recipe = readGitCacheRestoration(snapshot); }

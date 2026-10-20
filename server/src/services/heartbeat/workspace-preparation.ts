@@ -1,3 +1,5 @@
+import { preparePluginWorkspace, type WorkspaceWorkers } from "../plugin-workspaces.js";
+import { readWorkspaceProviderBinding } from "@paperclipai/shared";
 import { nativeExecutionUsesTaskWorkspace } from "./external-provider.js";
 import { readGitCacheRestoration } from "../git-workspace-restoration.js";
 import { createHeartbeatPreparationTiming } from "./preparation-timing.js";
@@ -37,6 +39,7 @@ import {
   cleanupExecutionWorkspaceArtifacts,
   ensurePersistedExecutionWorkspaceAvailable,
   realizeExecutionWorkspace,
+  renderWorkspaceTemplate, sanitizeBranchName,
   type ExecutionWorkspaceInput,
   type RealizedExecutionWorkspace,
 } from "../workspace-runtime.js";
@@ -131,6 +134,7 @@ export interface HeartbeatWorkspacePreparationInput {
     runOptions: { nativeRestartRecovery?: NativeRestartRecoveryClaim };
   };
   services: {
+    workspaceWorkers?: WorkspaceWorkers;
     envOrchestrator: Pick<ReturnType<typeof environmentRunOrchestrator>, "resolveEnvironment" | "acquireForRun" | "realizeForRun">;
     executionWorkspacesSvc: Pick<ReturnType<typeof executionWorkspaceService>, "create" | "update" | "bindTaskWorkspace" | "prepareTaskRepositoriesForAdmission" | "assertTaskRepositoryPublicationAllowed" | "prepareConfiguredRepositoryCopy" | "assertTaskRepositoryRecoveryBinding">;
     workspaceOperationsSvc: Pick<ReturnType<typeof workspaceOperationService>, "createRecorder">;
@@ -338,7 +342,22 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     },
   }));
   const hostProvisionDriver = selectedEnvironmentForConfig?.driver ?? lowTrustPreflightEnvironmentDriver;
-  const copyOnlyProvisioning = await timeWorkspace("workspace_provision_policy", () => workspaceRequiresCopyOnlyProvisioning(db, {
+  const pluginPrepared = isDotRun ? null : await preparePluginWorkspace(db, input.services.workspaceWorkers, {
+    companyId: agent.companyId, projectId: resolvedWorkspace.projectId, projectWorkspaceId: resolvedWorkspace.workspaceId,
+    issueId, runId: run.id, agentId: agent.id, responsibleUserId,
+    existingWorkspaceId: reusableExistingExecutionWorkspace?.id ?? issueRef?.executionWorkspaceId ?? null,
+    mode: requestedExecutionWorkspaceMode,
+    strategy: resolveEffectiveWorkspaceStrategyType(requestedExecutionWorkspaceMode, mergedConfig),
+    branchMode: typeof parseObject(mergedConfig.workspaceStrategy).existingBranch === "string" ? "existing" : "create",
+    branchName: typeof parseObject(mergedConfig.workspaceStrategy).existingBranch === "string"
+      ? String(parseObject(mergedConfig.workspaceStrategy).existingBranch)
+      : sanitizeBranchName(renderWorkspaceTemplate(String(parseObject(mergedConfig.workspaceStrategy).branchTemplate ?? "{{issue.identifier}}-{{slug}}"), {
+        issue: issueRef, agent, projectId: resolvedWorkspace.projectId, repoRef: resolvedWorkspace.repoRef,
+      })),
+    baseRef: typeof parseObject(mergedConfig.workspaceStrategy).baseRef === "string"
+      ? String(parseObject(mergedConfig.workspaceStrategy).baseRef) : null,
+  });
+  const copyOnlyProvisioning = pluginPrepared ? true : await timeWorkspace("workspace_provision_policy", () => workspaceRequiresCopyOnlyProvisioning(db, {
     companyId: agent.companyId,
     task: issueRef ? { ...issueRef, workspaceSelection: input.task.workspaceSelection } : null,
     sourceProjectId: resolvedWorkspace.projectId,
@@ -360,7 +379,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     repoRef: resolvedWorkspace.repoRef,
     additionalWorkspaces: resolvedWorkspace.additionalWorkspaces,
   } satisfies ExecutionWorkspaceInput;
-  await timeWorkspace("workspace_base_validation", () => assertGitWorktreeBaseWorkspaceReady({
+  if (!pluginPrepared) await timeWorkspace("workspace_base_validation", () => assertGitWorktreeBaseWorkspaceReady({
     requestedExecutionWorkspaceMode,
     config: hostExecutionWorkspaceConfig,
     issue: issueRef,
@@ -495,7 +514,14 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     executionWorkspace,
     reusedExecutionWorkspace,
     policy: resolvedWorkspaceReusePolicy,
-  } = isDotRun ? { executionWorkspace: { ...executionWorkspaceBase, strategy: "project_primary" as const, cwd: resolvedWorkspace.cwd, branchName: null, worktreePath: null, warnings: [], created: false, branchCreatedByRuntime: false } as RealizedExecutionWorkspace, reusedExecutionWorkspace: false, policy: workspaceReuseProvisioningPolicy } : await timeWorkspace("workspace_provision", () => provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>(
+  } = pluginPrepared ? { executionWorkspace: { ...executionWorkspaceBase,
+    providerBinding: readWorkspaceProviderBinding(pluginPrepared.metadata)!,
+    strategy: pluginPrepared.strategyType as "git_worktree" | "project_primary",
+    cwd: `/workspaces/${pluginPrepared.id}`, branchName: pluginPrepared.branchName, worktreePath: null,
+    warnings: [], created: false, branchCreatedByRuntime: false,
+    baseRefSha: pluginPrepared.metadata?.workspaceProviderBaseSha as string | null,
+  } as RealizedExecutionWorkspace, reusedExecutionWorkspace: Boolean(reusableExistingExecutionWorkspace), policy: workspaceReuseProvisioningPolicy }
+    : isDotRun ? { executionWorkspace: { ...executionWorkspaceBase, strategy: "project_primary" as const, cwd: resolvedWorkspace.cwd, branchName: null, worktreePath: null, warnings: [], created: false, branchCreatedByRuntime: false } as RealizedExecutionWorkspace, reusedExecutionWorkspace: false, policy: workspaceReuseProvisioningPolicy } : await timeWorkspace("workspace_provision", () => provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>(
     {
       requestedShouldReuseExisting,
       existingExecutionWorkspaceId:
@@ -704,7 +730,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
         ]
       : null;
   if (
-    !persistedWorktreeInstanceRoot &&
+    !pluginPrepared && !persistedWorktreeInstanceRoot &&
     executionWorkspace.strategy === "git_worktree" &&
     executionWorkspace.worktreePath
   ) {
@@ -729,6 +755,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   }
   const nextExecutionWorkspaceMetadata = {
     ...baseExecutionWorkspaceMetadata,
+    ...(pluginPrepared?.metadata ?? {}),
     ...(copyOnlyProvisioning ? { [CONTROLLER_PROVISION_COPY_ONLY]: true } : {}),
     ...(persistedWorktreeInstanceRoot
       ? {
@@ -744,6 +771,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     executionWorkspace.branchName;
   try {
     persistedExecutionWorkspace =
+      pluginPrepared ? await executionWorkspacesSvc.update(pluginPrepared.id, { metadata: nextExecutionWorkspaceMetadata }) :
       resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace &&
       reusableExistingExecutionWorkspace
         ? await timeWorkspace("workspace_record_update", () => executionWorkspacesSvc.update(
@@ -891,14 +919,14 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   }
   await bindIssueToPersistedExecutionWorkspace(persistedExecutionWorkspace);
   const projectRepositoryPaths: string[] = [];
-  if (!isDotRun && persistedExecutionWorkspace && issueId && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId) {
+  if (!pluginPrepared && !isDotRun && persistedExecutionWorkspace && issueId && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId) {
     const taskRepositories = await timeWorkspace("workspace_repository_admission", () =>
       executionWorkspacesSvc.prepareTaskRepositoriesForAdmission({ companyId: agent.companyId,
         issueId, workspaceId: persistedExecutionWorkspace!.id, cwd: executionWorkspace.cwd,
         agentId: agent.id, runId: run.id, responsibleUserId }));
     projectRepositoryPaths.push(...taskRepositories.map(repository => repository.relativePath));
   }
-  if (executionWorkspace.projectId
+  if (!pluginPrepared && executionWorkspace.projectId
     && (resolvedWorkspace.source === "project_primary" || Boolean(reusableExistingExecutionWorkspace?.projectWorkspaceId))
     && !resolvedWorkspace.baseCwdFallback && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId) {
     const repositoryRows = await db.select().from(projectWorkspaces).where(and(
@@ -1095,7 +1123,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   await bindIssueToPersistedExecutionWorkspace(persistedExecutionWorkspace);
   const workspaceRealization = realizationResult.workspaceRealization;
   const executionTarget = realizationResult.executionTarget;
-  if (!isDotRun && issueId && (persistedNativeExecutionInput || nativeRecoveryExecutionWorkspaceId)
+  if (!pluginPrepared && !isDotRun && issueId && (persistedNativeExecutionInput || nativeRecoveryExecutionWorkspaceId)
       && !(executionTarget?.kind === "remote" && executionTarget.transport === "ssh")) {
     const workspaceId = persistedNativeExecutionInput?.binding.executionWorkspaceId ?? nativeRecoveryExecutionWorkspaceId!;
     const reference = readNativeWorkspaceSyncReference(parseObject(run.runnerProfileJson).nativeWorkspaceSync);

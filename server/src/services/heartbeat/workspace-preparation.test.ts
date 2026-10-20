@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { captureDirectorySnapshot, directorySnapshotSha256, serializeDirectorySnapshot } from "@paperclipai/adapter-utils/workspace-restore-merge";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
-import { agents, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, environmentLeases, executionWorkspaces, executionWorkspaceRepositoryAccess, heartbeatRuns, issues, issueAccessGrants, projects, projectWorkspaces, type Db } from "@paperclipai/db";
+import { agents, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, environmentLeases, executionWorkspaces, executionWorkspaceRepositoryAccess, heartbeatRuns, issues, issueAccessGrants, plugins, projects, projectWorkspaces, type Db } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
@@ -94,6 +94,37 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     };
     return { input, source, issue, run, envOrchestrator };
   }
+  it("prepares managed storage before acquisition without touching a Core checkout", async () => {
+    const { input, source, issue } = await fixture(true);
+    const [plugin] = await db.insert(plugins).values({ pluginKey: "test.managed-storage", packageName: "test-storage", version: "1.0.0", apiVersion: 1, status: "ready", categories: ["workspace"],
+      manifestJson: { id: "test.managed-storage", apiVersion: 1, version: "1.0.0", displayName: "Storage", description: "Storage", author: "Test", categories: ["workspace"],
+        workspaceProvider: true, capabilities: ["workspaces.manage", "events.subscribe"], resourceLifecycle: ["project"], entrypoints: { worker: "./worker.js" } } }).returning();
+    await db.update(projects).set({ executionWorkspacePolicy: { enabled: true, storageProviderPluginId: plugin.id } }).where(eq(projects.id, issue.projectId!));
+    await db.update(projectWorkspaces).set({ cwd: null, sourceType: "remote_managed", repoUrl: "https://github.com/example/repo.git" }).where(eq(projectWorkspaces.id, issue.projectWorkspaceId!));
+    await rm(source, { recursive: true });
+    const sequence: string[] = [];
+    input.services.workspaceWorkers = { getWorker: () => ({ supportedMethods: ["workspaceOperation"] }), call: async (_: string, __: string, params: any) => {
+      sequence.push("prepare");
+      return { kind: "prepared", binding: { pluginId: plugin.id, projectId: issue.projectId, executionWorkspaceId: params.executionWorkspaceId,
+        projectWorkspaceId: issue.projectWorkspaceId, sourceRevision: params.operation.source.revision, workspaceRef: "provider:checkout" },
+        branchName: params.operation.branchName, baseSha: "a".repeat(40), created: true, branchCreatedByRuntime: true };
+    } } as any;
+    const acquire = input.services.envOrchestrator.acquireForRun;
+    vi.spyOn(input.services.envOrchestrator, "acquireForRun").mockImplementation(async args => {
+      sequence.push("acquire"); expect(args.persistedExecutionWorkspace).toMatchObject({ providerType: "plugin", cwd: null });
+      return acquire(args);
+    });
+    vi.spyOn(input.services.envOrchestrator, "realizeForRun").mockImplementation(async args => {
+      expect(args.executionWorkspace.providerBinding?.workspaceRef).toBe("provider:checkout");
+      throw new Error("reached execution handoff");
+    });
+    await expect(prepareHeartbeatWorkspace(db, input)).rejects.toThrow("reached execution handoff");
+    expect(sequence).toEqual(["prepare", "acquire"]);
+    await expect(access(source)).rejects.toThrow();
+    const [task] = await db.select().from(issues).where(eq(issues.id, issue.id));
+    const [workspace] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, task.executionWorkspaceId!));
+    expect(workspace).toMatchObject({ providerType: "plugin", cwd: null, branchName: "test-WSP-1" });
+  });
   const readIssue = (id: string) => db.select().from(issues).where(eq(issues.id, id)).then(rows => rows[0]!);
   const readRun = (id: string) => db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id)).then(rows => rows[0]!);
   const leases = (id: string) => db.select().from(environmentLeases).where(eq(environmentLeases.heartbeatRunId, id));

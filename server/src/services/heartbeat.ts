@@ -907,7 +907,7 @@ export function heartbeatService(
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
   const treeControlSvc = issueTreeControlService(db);
-  const executionWorkspacesSvc = executionWorkspaceService(db);
+  const executionWorkspacesSvc = executionWorkspaceService(db, { pluginWorkerManager: options.pluginWorkerManager });
   const environmentsSvc = environmentService(db);
   const environmentRuntime =
     options.environmentRuntime ??
@@ -2697,6 +2697,7 @@ export function heartbeatService(
           runOptions,
         },
         services: {
+          workspaceWorkers: options.pluginWorkerManager,
           envOrchestrator,
           executionWorkspacesSvc,
           workspaceOperationsSvc,

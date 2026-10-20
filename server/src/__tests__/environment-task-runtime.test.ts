@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import type { Db } from "@paperclipai/db";
+import { executionWorkspaces, type Db } from "@paperclipai/db";
 import { environmentTaskOperationSchema, parseEnvironmentTaskResult } from "@paperclipai/plugin-sdk";
 import { executeEnvironmentTask } from "../services/environment-task-runtime.js";
 
@@ -15,9 +15,10 @@ const row = () => ({
   environment: { id: "environment", config: { pluginKey: "test.provider", driverKey: "tasks", driverConfig: {} } } as { id: string; config: Record<string, unknown> } | null,
   run: { id: "run", agentId: "agent", status: "running" } as { id: string; agentId: string; status: string } | null,
 });
-function database(value: ReturnType<typeof row> | null = row(), projectRows = [{ id: projectId }]) {
+function database(value: ReturnType<typeof row> | null = row(), projectRows = [{ id: projectId }], workspaceRows: unknown[] = []) {
+  let selectedRows: unknown[] = projectRows;
   const results = [value ? [value] : [], [{ id: "issue" }]];
-  const query: any = { from: () => query, leftJoin: () => query, where: vi.fn(() => query), limit: () => Promise.resolve(results.shift()), then: (resolve: (rows: typeof projectRows) => unknown) => Promise.resolve(projectRows).then(resolve) };
+  const query: any = { from: (table: unknown) => { selectedRows = table === executionWorkspaces ? workspaceRows : projectRows; return query; }, leftJoin: () => query, where: vi.fn(() => query), limit: () => Promise.resolve(results.shift()), then: (resolve: (rows: typeof projectRows) => unknown) => Promise.resolve(selectedRows).then(resolve as (rows: unknown[]) => unknown) };
   const update: any = { set: () => update, where: () => update,
     returning: async () => [{ id: leaseId }], then: (resolve: (value: unknown) => unknown) => Promise.resolve([]).then(resolve) };
   return { db: { select: () => query, update: () => update } as unknown as Db, query };
@@ -31,6 +32,22 @@ beforeEach(() => {
   state.plugin = { id: "original", pluginKey: "test.provider", status: "ready", manifestJson: { capabilities: ["environment.drivers.register"], environmentDrivers: [{ driverKey: "tasks", supportsTasks: true }] } };
 });
 describe("plugin-provided Runner execution", () => {
+  it("passes only the workspace binding pinned to this lease and provider", async () => {
+    const value = row();
+    const binding = { pluginId: leaseId, projectId, executionWorkspaceId: secondProjectId, projectWorkspaceId: projectId,
+      sourceRevision: "revision", workspaceRef: "provider:checkout" };
+    state.plugin.id = binding.pluginId;
+    Object.assign(value.lease, { executionWorkspaceId: binding.executionWorkspaceId });
+    Object.assign(value.lease.metadata, { pluginId: binding.pluginId, workspaceProvider: binding });
+    const workspace = { id: binding.executionWorkspaceId, companyId: "company", providerType: "plugin", providerRef: binding.workspaceRef,
+      status: "active", metadata: { workspaceProvider: binding } };
+    const workers = worker();
+    await executeEnvironmentTask(database(value, [], [workspace]).db, workers as never, { companyId: "company", leaseId, operation: { ...submit, projectIds: [] } });
+    expect(workers.call).toHaveBeenCalledWith(binding.pluginId, "environmentTask", expect.objectContaining({ workspace: binding }), 15_000);
+    const denied = worker(); workspace.providerRef = "foreign";
+    await expect(executeEnvironmentTask(database(value, [], [workspace]).db, denied as never, { companyId: "company", leaseId, operation: { ...submit, projectIds: [] } })).rejects.toThrow("binding changed");
+    expect(denied.call).not.toHaveBeenCalled();
+  });
   it("accepts artifact identity and excludes filesystem transfer from the contract", () => {
     const operation = environmentTaskOperationSchema.parse({ kind: "describe" });
     const description = { kind: "description", taskId: "attempt-1", runner: { version: "fixture", digest: `sha256:${"a".repeat(64)}` } };

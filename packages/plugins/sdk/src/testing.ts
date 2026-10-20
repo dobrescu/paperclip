@@ -2837,3 +2837,12 @@ export function createEnvironmentTestHarness(options: EnvironmentTestHarnessOpti
 
   return envHarness;
 }
+
+/** Run the same operation/result validation as the worker RPC boundary. */
+export function createWorkspaceProviderHarness(handler: (params: import("./workspace-provider.js").PluginWorkspaceParams) => Promise<import("./workspace-provider.js").PluginWorkspaceResult>) {
+  return { async operation(params: import("./workspace-provider.js").PluginWorkspaceParams) {
+    const { pluginWorkspaceParamsSchema, parseWorkspaceProviderResult } = await import("./workspace-provider.js");
+    pluginWorkspaceParamsSchema.parse(params);
+    return parseWorkspaceProviderResult(params, await handler(params));
+  } };
+}
