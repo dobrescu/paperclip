@@ -3434,7 +3434,7 @@ export function issueRoutes(
   const goalsSvc = goalService(db);
   const issueApprovalsSvc = issueApprovalService(db);
   const recoveryActionsSvc = issueRecoveryActionService(db);
-  const executionWorkspacesSvc = executionWorkspaceServiceDirect(db);
+  const executionWorkspacesSvc = executionWorkspaceServiceDirect(db, { pluginWorkerManager: opts.pluginWorkerManager });
   const workProductsSvc = workProductService(db);
   const documentsSvc = documentService(db);
   const artifactReviewDocumentsSvc = artifactReviewDocumentService(db, storage);

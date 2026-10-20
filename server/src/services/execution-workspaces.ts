@@ -3111,18 +3111,23 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         },
       ];
       for (const action of configuredCleanupCommands) {
-        if (!action.command) continue;
+        if (!action.command || executionWorkspace.providerType === "plugin") continue;
         plannedActions.push(action);
       }
 
       const teardownCommand = config?.teardownCommand ?? projectPolicy?.workspaceStrategy?.teardownCommand ?? null;
-      if (teardownCommand) {
+      if (teardownCommand && executionWorkspace.providerType !== "plugin") {
         plannedActions.push({
           kind: "teardown_command",
           label: "Run teardown command",
           description: "Teardown runs after cleanup commands during workspace close.",
           command: teardownCommand,
         });
+      }
+
+      if (executionWorkspace.providerType === "plugin") {
+        plannedActions.push({ kind: "remove_provider_workspace", label: "Remove provider workspace",
+          description: "The storage plugin will verify remote recovery and remove the workspace.", command: null });
       }
 
       if (executionWorkspace.providerType === "git_worktree" && workspacePath) {
@@ -3134,7 +3139,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         });
       }
 
-      if (git?.createdByRuntime && executionWorkspace.branchName) {
+      if (executionWorkspace.providerType !== "plugin" && git?.createdByRuntime && executionWorkspace.branchName) {
         plannedActions.push({
           kind: "git_branch_delete",
           label: "Delete runtime-created branch",
@@ -4399,6 +4404,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         .where(eq(executionWorkspaces.id, id))
         .then((rows) => rows[0] ?? null);
       if (!existingRow) throw notFound("Execution workspace not found");
+      if (existingRow.providerType === "plugin") throw conflict("Branch repair belongs to the workspace storage plugin");
 
       const existing = toExecutionWorkspace(existingRow);
       if (!existing.sourceIssueId) {

@@ -49,92 +49,78 @@ const support = await getEmbeddedPostgresTestSupport();
         pluginId = randomUUID(),
         issueId = randomUUID(),
         runId = randomUUID();
-      await db
-        .insert(companies)
-        .values({
-          id: companyId,
-          name: "Storage fixture",
-          issuePrefix: companyId.slice(0, 8).toUpperCase(),
-        });
-      await db
-        .insert(agents)
-        .values({
-          id: agentId,
-          companyId,
-          name: "Worker",
-          role: "engineer",
-          status: "idle",
-          adapterType: "paperclip_runner",
-        });
-      await db
-        .insert(plugins)
-        .values({
-          id: pluginId,
-          pluginKey: `test.${pluginId}`,
-          packageName: "test-storage",
-          version: "1.0.0",
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Storage fixture",
+        issuePrefix: companyId.slice(0, 8).toUpperCase(),
+      });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Worker",
+        role: "engineer",
+        status: "idle",
+        adapterType: "paperclip_runner",
+      });
+      await db.insert(plugins).values({
+        id: pluginId,
+        pluginKey: `test.${pluginId}`,
+        packageName: "test-storage",
+        version: "1.0.0",
+        apiVersion: 1,
+        status: "ready",
+        categories: ["workspace"],
+        manifestJson: {
+          id: `test.${pluginId}`,
           apiVersion: 1,
-          status: "ready",
+          version: "1.0.0",
+          displayName: "Storage",
+          description: "Storage",
+          author: "Test",
           categories: ["workspace"],
-          manifestJson: {
-            id: `test.${pluginId}`,
-            apiVersion: 1,
-            version: "1.0.0",
-            displayName: "Storage",
-            description: "Storage",
-            author: "Test",
-            categories: ["workspace"],
-            capabilities: ["workspaces.manage", "events.subscribe"],
-            resourceLifecycle: ["project"],
-            workspaceProvider: true,
-            entrypoints: { worker: "./worker.js" },
-          },
-        });
-      await db
-        .insert(projects)
-        .values({
-          id: projectId,
-          companyId,
-          name: "Project",
-          status: "in_progress",
-          executionWorkspacePolicy: {
-            enabled: true,
-            storageProviderPluginId: pluginId,
-          },
-        });
-      await db
-        .insert(projectWorkspaces)
-        .values({
-          id: sourceId,
-          companyId,
-          projectId,
-          name: "Repository",
-          sourceType: "remote_managed",
-          repoUrl: "https://github.com/example/repo.git",
-          cwd: null,
-          isPrimary: true,
-        });
-      await db
-        .insert(issues)
-        .values({
-          id: issueId,
-          companyId,
-          projectId,
-          projectWorkspaceId: sourceId,
-          title: "Task",
-          status: "in_progress",
-          assigneeAgentId: agentId,
-        });
-      await db
-        .insert(heartbeatRuns)
-        .values({
-          id: runId,
-          companyId,
-          agentId,
-          issueId,
-          invocationSource: "manual",
-          status: "running",
-        });
+          capabilities: ["workspaces.manage", "events.subscribe"],
+          resourceLifecycle: ["project"],
+          workspaceProvider: true,
+          entrypoints: { worker: "./worker.js" },
+        },
+      });
+      await db.insert(projects).values({
+        id: projectId,
+        companyId,
+        name: "Project",
+        status: "in_progress",
+        executionWorkspacePolicy: {
+          enabled: true,
+          storageProviderPluginId: pluginId,
+        },
+      });
+      await db.insert(projectWorkspaces).values({
+        id: sourceId,
+        companyId,
+        projectId,
+        name: "Repository",
+        sourceType: "remote_managed",
+        repoUrl: "https://github.com/example/repo.git",
+        cwd: null,
+        isPrimary: true,
+      });
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        projectId,
+        projectWorkspaceId: sourceId,
+        title: "Task",
+        status: "in_progress",
+        assigneeAgentId: agentId,
+      });
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId,
+        agentId,
+        issueId,
+        invocationSource: "manual",
+        status: "running",
+      });
       const calls: any[] = [];
       let loseResponse = false,
         dirty = false;
@@ -242,15 +228,47 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(result!.id).toBe(task.executionWorkspaceId);
       expect(f.calls[1].operationId).toBe(f.calls[0].operationId);
     });
+    it("reconciles a lost preparation result after the task run stops", async () => {
+      const f = await fixture();
+      f.lose();
+      await expect(
+        preparePluginWorkspace(db, f.workers, f.input),
+      ).rejects.toThrow("incomplete");
+      await db
+        .update(heartbeatRuns)
+        .set({ status: "cancelled" })
+        .where(eq(heartbeatRuns.id, f.runId));
+      const [task] = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, f.issueId));
+      const [reservation] = await db
+        .select()
+        .from(executionWorkspaces)
+        .where(eq(executionWorkspaces.id, task.executionWorkspaceId!));
+      expect(reservation.providerRef).toBeNull();
+      await expect(
+        inspectPluginWorkspace(db, f.workers, reservation),
+      ).resolves.toMatchObject({ remotelyRecoverable: true });
+      expect(f.calls[1]).toMatchObject({
+        runId: null,
+        agentId: null,
+        operation: { kind: "prepare" },
+      });
+      expect(f.calls[1].operationId).toBe(f.calls[0].operationId);
+      const [recorded] = await db
+        .select()
+        .from(executionWorkspaces)
+        .where(eq(executionWorkspaces.id, reservation.id));
+      expect(recorded.providerRef).not.toBeNull();
+    });
     it("fails closed for a disabled plugin, stopped run, and cross-company source", async () => {
       const f = await fixture();
-      await db
-        .insert(pluginCompanySettings)
-        .values({
-          pluginId: f.pluginId,
-          companyId: f.companyId,
-          enabled: false,
-        });
+      await db.insert(pluginCompanySettings).values({
+        pluginId: f.pluginId,
+        companyId: f.companyId,
+        enabled: false,
+      });
       await expect(
         preparePluginWorkspace(db, f.workers, f.input),
       ).rejects.toThrow("unavailable");
@@ -301,6 +319,28 @@ const support = await getEmbeddedPostgresTestSupport();
       await expect(
         execution.update(workspace!.id, { providerType: "local_fs" }),
       ).rejects.toThrow("storage plugin");
+    });
+    it("describes provider removal without promising host cleanup commands", async () => {
+      const f = await fixture();
+      const workspace = await preparePluginWorkspace(db, f.workers, f.input);
+      await db
+        .update(issues)
+        .set({ status: "done" })
+        .where(eq(issues.id, f.issueId));
+      const readiness = await executionWorkspaceService(db, {
+        pluginWorkerManager: f.workers,
+      }).getCloseReadiness(workspace!.id);
+      expect(readiness!.plannedActions).toContainEqual(
+        expect.objectContaining({
+          kind: "remove_provider_workspace",
+          command: null,
+        }),
+      );
+      expect(
+        readiness!.plannedActions.some(
+          (action) => action.kind === "git_branch_delete",
+        ),
+      ).toBe(false);
     });
     it("reopens through the same provider without requiring a live run or a host checkout", async () => {
       const f = await fixture();

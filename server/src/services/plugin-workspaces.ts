@@ -459,11 +459,76 @@ export async function preparePluginWorkspace(
   });
 }
 
+/** Recover a lost prepare result even when the originating run has already stopped. */
+async function reconcilePluginWorkspaceReservation(
+  db: Db,
+  workers: WorkspaceWorkers | undefined,
+  snapshot: Workspace,
+): Promise<Workspace> {
+  const [workspace] = await db
+    .select()
+    .from(executionWorkspaces)
+    .where(
+      and(
+        eq(executionWorkspaces.id, snapshot.id),
+        eq(executionWorkspaces.companyId, snapshot.companyId),
+      ),
+    );
+  if (!workspace) throw conflict("Workspace is unavailable");
+  if (readWorkspaceProviderBinding(workspace.metadata)) return workspace;
+  const owner = workspace.metadata?.workspaceProviderOwner;
+  if (typeof owner !== "string" || !workspace.metadata?.workspaceProviderSource)
+    throw conflict("Workspace storage reservation is unavailable");
+  const operation = workspaceProviderOperationSchema.parse({
+    kind: "prepare",
+    source: workspace.metadata.workspaceProviderSource,
+    mode: workspace.mode,
+    strategy: workspace.strategyType,
+    branchName: workspace.branchName,
+    branchMode: workspace.metadata.workspaceProviderBranchMode ?? "create",
+    baseRef: workspace.baseRef,
+    existing: null,
+  });
+  const result = await callWorkspaceProvider(db, workers, {
+    workspace,
+    pluginId: owner,
+    operation,
+  });
+  if (result.kind !== "prepared")
+    throw conflict("Workspace reconciliation is incomplete");
+  const [updated] = await db
+    .update(executionWorkspaces)
+    .set({
+      providerRef: result.binding.workspaceRef,
+      branchName: result.branchName,
+      updatedAt: new Date(),
+      metadata: {
+        ...workspace.metadata,
+        workspaceProvider: result.binding,
+        workspaceProviderBaseSha: result.baseSha,
+        createdByRuntime: result.branchCreatedByRuntime,
+      },
+    })
+    .where(
+      and(
+        eq(executionWorkspaces.id, workspace.id),
+        eq(executionWorkspaces.companyId, workspace.companyId),
+        sql`${executionWorkspaces.providerRef} IS NULL`,
+        sql`coalesce((${executionWorkspaces.metadata}->>'lifecycleGeneration')::int, 0) = ${workspace.metadata?.lifecycleGeneration ?? 0}`,
+      ),
+    )
+    .returning();
+  if (!updated)
+    throw conflict("Workspace changed during reconciliation; retry inspection");
+  return updated;
+}
+
 export async function inspectPluginWorkspace(
   db: Db,
   workers: WorkspaceWorkers | undefined,
   workspace: Workspace,
 ) {
+  workspace = await reconcilePluginWorkspaceReservation(db, workers, workspace);
   const binding = readWorkspaceProviderBinding(workspace.metadata);
   if (!binding) throw conflict("Workspace storage binding is unavailable");
   const result = await callWorkspaceProvider(db, workers, {
@@ -481,6 +546,7 @@ export async function removePluginWorkspace(
   workspace: Workspace,
   expectedHeadSha: string | null,
 ) {
+  workspace = await reconcilePluginWorkspaceReservation(db, workers, workspace);
   const binding = readWorkspaceProviderBinding(workspace.metadata);
   if (!binding) throw conflict("Workspace storage binding is unavailable");
   const inspection = await inspectPluginWorkspace(db, workers, workspace);
@@ -548,6 +614,7 @@ export async function restorePluginWorkspace(
   workers: WorkspaceWorkers | undefined,
   workspace: Workspace,
 ) {
+  workspace = await reconcilePluginWorkspaceReservation(db, workers, workspace);
   const binding = readWorkspaceProviderBinding(workspace.metadata);
   const source = workspace.metadata?.workspaceProviderSource;
   if (!binding || !source)

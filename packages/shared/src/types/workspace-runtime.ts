@@ -53,6 +53,7 @@ export type ExecutionWorkspaceCloseActionKind =
   | "stop_runtime_services"
   | "cleanup_command"
   | "teardown_command"
+  | "remove_provider_workspace"
   | "git_worktree_remove"
   | "git_branch_delete"
   | "remove_local_directory";
