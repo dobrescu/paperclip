@@ -3092,3 +3092,29 @@ pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-workspace-prepar
 
 It compares actual preparation guards with synthetic history. Local timings are
 separate from Git materialization, environment acquisition, and provider startup.
+
+### Skill-source background synchronization
+
+Skill imports and automatic source refreshes use the delivery coordinator. Workspace
+attachment, adoption, source settings, manual refresh, disconnection, project deletion,
+and company status changes notify it through their database transaction. Nested
+transactions notify after the outer transaction settles. Budget pause/resume uses
+the same notification. The existing database work protocol resolves uncertain commits.
+
+Startup reconstructs work from `project_skill_sources` and `company_skill_sources`.
+After each sweep, the worker schedules the earliest eligible `next_sync_at`, postponed
+until an outstanding lease expires. Due batches and conflicting claims retry after
+five seconds; failures retain their saved backoff. Finishing imports admits deferred
+repositories into the existing capacity limits. Empty or inactive configuration has
+no recurring synchronization SQL. Automatic sources still check upstream every five
+minutes, because upstream changes do not send this worker an event.
+
+The worker defers dispatch during idle drain and warm standby, preserving requests
+until a successful sweep. Shutdown aborts provider reads and waits for the current
+sweep. Notifications are process-local: independent SQL writers and separate live
+server replicas are not a supported notification path. Restart restores saved work.
+
+These deadlines are not yet covered by the Paperclip Cloud scheduled-wake contract.
+The sleep-safety report retains the instance while an active company has pending
+imports or eligible automatic refreshes. Removing the five-second discovery poll
+establishes worker quiet; it does not establish host or database suspension.

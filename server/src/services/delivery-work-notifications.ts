@@ -20,6 +20,7 @@ export const DELIVERY_QUEUES = {
   browser: "browser-use",
   email: "email-channels",
   museMaintenance: "muse-maintenance",
+  skillSourceSync: "skill-source-sync",
   fastResponse: "fast-responses",
   feedback: "feedback-exports",
   chatCompletion: "chat-completions",

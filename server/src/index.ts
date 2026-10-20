@@ -1234,15 +1234,6 @@ async function startServerWithDatabaseTeardown(
     heartbeatSchedulerInterval?.unref?.();
   };
   const skillSourceSync = skillSourceSyncService(db as any);
-  const sweepSkillSources = () => {
-    if (isIdleTaskDrainActive() || heartbeatSchedulerStopped || isWarmStandby()) return;
-    trackHeartbeatSchedulerWork(skillSourceSync.tick().catch(err => {
-      logger.error({ err }, "skill source synchronization failed");
-    }));
-  };
-  const skillSourceSyncInterval = setInterval(sweepSkillSources, 5000);
-  skillSourceSyncInterval.unref?.();
-  sweepSkillSources();
   // Materialized skill versions are disk caches of version rows. The sweep is
   // single-flight, bounded per tick, and stops between removals on shutdown or
   // idle drain. The first sweep runs after startup without delaying readiness.
@@ -1310,7 +1301,6 @@ async function startServerWithDatabaseTeardown(
     enabled: async () => (await instanceSettingsService(db).getExperimental()).enableExternalObjects === true,
   });
   const scheduleExternalObjectRefreshSweep = (now = new Date()) => {
-    sweepSkillSources();
     if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
     trackHeartbeatSchedulerWork(externalObjects
       .refreshDueObjectsForActiveCompanies(50, now)
@@ -1354,6 +1344,7 @@ async function startServerWithDatabaseTeardown(
     resolveNativeQuestion: (interaction) => deliverNativeQuestionResponse(db as any, interaction),
   });
   const deliveryWork = app.locals.deliveryWork as ReturnType<typeof createDeliveryWorkCoordinator>;
+  skillSourceSync.start(deliveryWork);
   const caseHandoffDeliveries = caseHandoffDeliveryService(db as any, { heartbeat: environmentLeaseCleanupHeartbeat });
   deliveryWork.register(DELIVERY_QUEUES.caseHandoffs, {
     retryMs: 5_000,
@@ -2087,7 +2078,6 @@ async function startServerWithDatabaseTeardown(
   ) => {
     await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
     heartbeatSchedulerStopped = true;
-    clearInterval(skillSourceSyncInterval);
     clearInterval(skillVersionRetentionInterval);
     clearTimeout(skillVersionRetentionStartup);
     clearTimeout(skillVersionRetentionContinuation);

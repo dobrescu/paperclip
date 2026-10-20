@@ -1,3 +1,4 @@
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { enqueueProjectSkillSource, detachProjectSkillSource } from "./project-skill-source-bindings.js";
 import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -1070,6 +1071,7 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
       if (retained) throw conflict("This project still supplies access policy for retained task workspaces. Archive the project or explicitly clean up its workspaces before deleting it.");
       await tx.select({ id: projectWorkspaces.id }).from(projectWorkspaces).where(eq(projectWorkspaces.projectId, id)).for("update");
       await recordProjectLifecycleEvent(tx as unknown as Db, project.companyId, id, "delete");
+      await notifyDeliveryWork(tx, DELIVERY_QUEUES.skillSourceSync);
       const [row] = await tx.delete(projects).where(eq(projects.id, id)).returning();
       return row ? { ...row, urlKey: deriveProjectUrlKey(row.name, row.id) } : null;
     }),
