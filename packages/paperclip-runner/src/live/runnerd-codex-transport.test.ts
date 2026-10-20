@@ -2459,7 +2459,7 @@ it.each(["installed", "explicit"] as const)("records the selected %s Codex comma
   }
 });
 
-it("runs an environment-prepared descriptor without Core filesystem preparation", async () => {
+it.each(["reuse", "close-attachment", "timeout-attachment"] as const)("runs an environment-prepared descriptor without Core filesystem preparation (%s)", async mode => {
   const root = await mkdtemp(join(tmpdir(), "runner-environment-launch-"));
   const binary = defaultCapabilityRunnerdBinary();
   const artifact = { version: "0.3.0", digest: `sha256:${createHash("sha256").update(await readFile(binary)).digest("hex")}` };
@@ -2474,13 +2474,25 @@ it("runs an environment-prepared descriptor without Core filesystem preparation"
   let requestedRun = "";
   let requestedInstructions = "";
   const registered = new WeakSet<object>();
-  const create = () => createCapabilityRunnerdCodexTransport({ provider: "codex", runnerArtifact: artifact,
+  let enterPreparation!: () => void;
+  let finishPreparation!: () => void;
+  const preparationStarted = new Promise<void>(resolve => { enterPreparation = resolve; });
+  const preparationGate = new Promise<void>(resolve => { finishPreparation = resolve; });
+  const checkpoint = vi.fn();
+  const releaseRoute = vi.fn();
+  let currentRun = () => "";
+  const create = (closeGraceMs = 5_000) => createCapabilityRunnerdCodexTransport({ provider: "codex", runnerArtifact: artifact,
+    closeGraceMs,
     stateDirectory: root, runtimeContext: context,
     prpIdentity: { runnerInstanceId: "runner-prepared", environmentLeaseId: "lease-prepared", runId: "run-prepared",
       normalizedSessionId: "session-prepared", turnId: "turn-prepared", itemId: "item-prepared" },
     prepareLaunch: async (requirements, recovery) => {
       requestedRun = requirements.identity.runId;
       requestedInstructions = requirements.instructions;
+      if (requirements.identity.runId === "run-prepared-next" && mode !== "reuse") {
+        enterPreparation();
+        await preparationGate;
+      }
       if (recovery) { recovered = true; return recovery; }
       return { configurationId: `owned-${requirements.identity.runId}`,
       requirementsDigest: runnerLaunchRequirementsDigest(requirements),
@@ -2492,11 +2504,12 @@ it("runs an environment-prepared descriptor without Core filesystem preparation"
     }; },
     controlPlaneRegistration: async authority => {
       configuration = authority.store.state.runAttachTemplate;
+      currentRun = () => authority.store.state.identity.runId;
       if (!registered.has(authority)) {
         await authority.start();
         registered.add(authority);
       }
-      return { release: () => undefined };
+      return { release: releaseRoute, checkpoint };
     },
     runnerProcessLauncher: spec => {
       const child = spawn(binary, [...spec.args], { env: spec.environment, stdio: "ignore" });
@@ -2520,13 +2533,44 @@ it("runs an environment-prepared descriptor without Core filesystem preparation"
     await expect(stat(join(root, "codex-home"))).rejects.toHaveProperty("code", "ENOENT");
     await expect(stat(join(root, "runtime-context.json"))).rejects.toHaveProperty("code", "ENOENT");
     await transport.close();
-    const resumed = create();
+    const resumed = create(mode === "timeout-attachment" ? 500 : 5_000);
     try {
       await resumed.transport.request("thread/read", { threadId: (opened.thread as { id: string }).id });
       expect(recovered).toBe(true);
-      await resumed.transport.attachRun!({
+      checkpoint.mockClear();
+      releaseRoute.mockClear();
+      const attaching = resumed.transport.attachRun!({
         runId: "run-prepared-next", turnId: "turn-prepared-next", itemId: "item-prepared-next",
       });
+      void attaching.catch(() => undefined);
+      if (mode !== "reuse") {
+        await preparationStarted;
+        await expect(resumed.transport.attachRun!({
+          runId: "overlapping-run", turnId: "overlapping-turn", itemId: "overlapping-item",
+        })).rejects.toThrow("native_runner_run_attachment_in_progress");
+        let closed = false;
+        const closing = resumed.transport.close().finally(() => { closed = true; });
+        void closing.catch(() => undefined);
+        if (mode === "timeout-attachment") {
+          await expect(closing).rejects.toThrow();
+          expect(checkpoint).toHaveBeenCalledExactlyOnceWith("unsettled");
+          expect((await stat(root)).isDirectory()).toBe(true);
+        } else {
+          await new Promise(resolve => setTimeout(resolve, 300));
+          expect(closed).toBe(false);
+          expect(releaseRoute).not.toHaveBeenCalled();
+          expect(checkpoint).not.toHaveBeenCalled();
+        }
+        finishPreparation();
+        await expect(attaching).rejects.toThrow(/closed/);
+        if (mode === "close-attachment") {
+          await closing;
+          expect(checkpoint).toHaveBeenCalledExactlyOnceWith("settled");
+        }
+        expect(currentRun()).toBe("run-prepared");
+        return;
+      }
+      await attaching;
       expect(requestedRun).toBe("run-prepared-next");
       expect(requestedInstructions).toBe(composeNativeSystemInstructions(context, "Agent instructions"));
       await expect(resumed.transport.attachRun!({
@@ -2535,8 +2579,13 @@ it("runs an environment-prepared descriptor without Core filesystem preparation"
       })).rejects.toThrow("cannot change the durable Codex provider profile");
       expect(requestedRun).toBe("run-prepared-changed");
       expect(requestedInstructions).toContain("Next run instructions");
-    } finally { await resumed.transport.close(); }
+    } finally {
+      finishPreparation();
+      if (mode === "timeout-attachment") await resumed.transport.close().catch(() => undefined);
+      else await resumed.transport.close();
+    }
   } finally {
+    finishPreparation();
     await transport.close();
     materialize.mockRestore(); discover.mockRestore();
     await rm(root, { recursive: true, force: true });

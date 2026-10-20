@@ -3557,6 +3557,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
   #resolveClosedSignal!: () => void;
   #closePromise: Promise<void> | null = null;
   #startupOperation: Promise<unknown> | null = null;
+  #attachmentOperation: Promise<void> | null = null;
   #startupDrainTimedOut = false;
   #controllerDetachedForRestart = false;
   #failure: Error | null = null;
@@ -4047,7 +4048,24 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     );
   }
 
-  async attachRun(input: {
+  attachRun(input: {
+    runId: string;
+    turnId: string;
+    itemId: string;
+    currentRunGrant?: NativeRunRuntimeGrant;
+  }): Promise<void> {
+    if (this.#attachmentOperation !== null) {
+      return Promise.reject(new Error("native_runner_run_attachment_in_progress"));
+    }
+    const operation = Promise.resolve().then(() => {
+      this.#assertStartupOpen();
+      return this.#attachRun(input);
+    }).finally(() => { this.#attachmentOperation = null; });
+    this.#attachmentOperation = operation;
+    return operation;
+  }
+
+  async #attachRun(input: {
     runId: string;
     turnId: string;
     itemId: string;
@@ -4061,6 +4079,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       throw new Error("native_runner_prp_run_rotation_unavailable");
     }
     await this.#awaitWarmRunAttachmentReady();
+    this.#assertStartupOpen();
     const currentRunGrant = input.currentRunGrant
       ? projectCopilotRunGrant(input.currentRunGrant, this.options.runnerFilesystemRoot)
       : undefined;
@@ -4081,6 +4100,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     let previousReleased = false;
     let activationStarted = false;
     try {
+      this.#assertStartupOpen();
       const connection: RunnerProcessConnection =
         registration?.connection ??
         (registration?.connectUrl
@@ -4115,6 +4135,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
             ?? priorProvider.runtimeContext as NativeRuntimeContextSnapshot | null,
           currentRunGrant?.instructions ?? priorRequirements?.instructions ?? String(priorProvider.instructions ?? ""));
       }
+      this.#assertStartupOpen();
       this.#runAttachTemplate = structuredClone(runAttachTemplate);
       const payload = {
         ...runAttachTemplate,
@@ -4174,7 +4195,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       // The future route is ours from registration onward, including failures
       // in template construction, capability admission, and result waiting.
       // Keep the prior release owned by close until its handoff is confirmed.
-      this.#controlPlaneRelease = previousReleased ? null : previousRelease;
+      if (!this.#closed) this.#controlPlaneRelease = previousReleased ? null : previousRelease;
       await Promise.resolve()
         .then(() => registration?.release())
         .catch(() => undefined);
@@ -4480,18 +4501,19 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     this.#closed = true;
     this.#resolveClosedSignal();
     const { preparationDeadline, closeDeadline } = runnerCloseDeadlines(Date.now(), runnerCloseGraceMs(this.options));
-    let startupConfirmed = true;
-    if (this.#startupOperation !== null) {
+    let preparationConfirmed = true;
+    const attachmentPending = this.#attachmentOperation !== null;
+    if (this.#startupOperation !== null || attachmentPending) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
-          this.#startupOperation.catch(() => undefined),
+          Promise.allSettled([this.#startupOperation, this.#attachmentOperation]),
           new Promise<never>((_resolve, reject) => {
-            timer = setTimeout(() => reject(new Error("Native startup drain timed out")), Math.max(0, preparationDeadline - Date.now()));
+            timer = setTimeout(() => reject(new Error("Native preparation drain timed out")), Math.max(0, preparationDeadline - Date.now()));
           }),
         ]);
       } catch {
-        startupConfirmed = false;
+        preparationConfirmed = false;
         this.#startupDrainTimedOut = true;
       } finally { clearTimeout(timer); }
     }
@@ -4646,7 +4668,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     // an incomplete or identity-conflicting state remains fail-closed.
     const finalProviderState = this.#providerDrainState();
     const runnerSettled =
-      startupConfirmed && runnerSuspended &&
+      preparationConfirmed && runnerSuspended &&
       providerDrained &&
       this.#core?.semanticToolResultsSettled() === true &&
       (finalProviderState === null ||
@@ -4698,8 +4720,8 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       }
       throw new NativeSessionCloseUnrecoverableError(settlement);
     }
-    if (!startupConfirmed) {
-      throw new Error("Native runner startup cleanup is unconfirmed; recovery state retained.");
+    if (!preparationConfirmed) {
+      throw new Error(`Native runner ${attachmentPending ? "attachment" : "startup"} cleanup is unconfirmed; recovery state retained.`);
     }
     if (this.#ownsRoot && !adoptedRunner) {
       rmSync(this.#root, { recursive: true, force: true });
