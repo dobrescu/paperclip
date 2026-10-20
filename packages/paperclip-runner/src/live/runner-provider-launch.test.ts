@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createRunnerProviderLaunch, type RunnerProviderLaunchEnvironment, type RunnerProviderLaunchRequirements } from "./runner-provider-launch.js";
 
 const requirements: RunnerProviderLaunchRequirements = {
+  schema: "paperclip.runner.launch-requirements.v1",
   identity: { runnerInstanceId: "runner", environmentLeaseId: "lease", runId: "run",
     normalizedSessionId: "session", turnId: "turn", itemId: "item" },
   provider: "codex", model: "selected-model", approvalPolicy: "on-request",

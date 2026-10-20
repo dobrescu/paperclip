@@ -188,6 +188,27 @@ export function composeNativeSystemInstructions(context: NativeRuntimeContextSna
   ].filter(Boolean).join("\n\n");
 }
 
+export function retargetNativeSystemInstructions(
+  instructions: string,
+  prior: NativeRuntimeContextSnapshot,
+  current: NativeRuntimeContextSnapshot | null,
+): string {
+  const priorPrefix = prior.prompt.text;
+  const priorSuffix = composeNativeSystemInstructions(prior, "").slice(priorPrefix.length);
+  // Legacy callers can supply opaque system instructions. Only the composer's
+  // exact framing identifies a trusted asset block; never rewrite their text.
+  if (!instructions.startsWith(priorPrefix) || !instructions.endsWith(priorSuffix)) {
+    return instructions;
+  }
+  const custom = instructions.slice(priorPrefix.length, -priorSuffix.length);
+  if (custom && !custom.startsWith("\n\n")) return instructions;
+  // Keep custom entry bytes intact, including historical path examples or an
+  // identical paragraph quoted inside the entry. Only replace the final block.
+  return (current?.prompt.text ?? priorPrefix) + custom + (current
+    ? composeNativeSystemInstructions(current, "").slice(current.prompt.text.length)
+    : "");
+}
+
 /** Explicit per-turn selection; availability alone never invokes a skill. */
 export interface NativeSkillInput {
   type: "skill";

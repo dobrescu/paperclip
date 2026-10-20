@@ -86,10 +86,10 @@ async function withCopilotTestPlatform<T>(arch: "x64" | "arm64", run: () => Prom
 vi.mock("./installation-integrity.js", () => ({ verifyNativeAcpxInstallation: vi.fn() }));
 
 describe("Copilot build-owned installation", () => {
-  it("admits the current profile after launch preparation extraction", () => {
-    expect(QUALIFIED_ACPX_PROFILES.copilot.agentProfileVersion).toBe(50);
+  it("admits the current profile with environment launch preparation", () => {
+    expect(QUALIFIED_ACPX_PROFILES.copilot.agentProfileVersion).toBe(51);
     expect(QUALIFIED_ACPX_PROFILES.copilot.qualificationStatus).toBeUndefined();
-    expect(QUALIFIED_ACPX_PROFILES.copilot.commandDigest).toBe("sha256:d8f89c8e75883a793122ed908016b7730ededa6c3df741f23298c2445d7e6fc4");
+    expect(QUALIFIED_ACPX_PROFILES.copilot.commandDigest).toBe("sha256:ed0c89224b7790de233ddc520e2e112659d773fe754bff53e64ae92407bd6006");
   });
 
   it("preserves v49 while binding the extracted provider launch builder", () => {

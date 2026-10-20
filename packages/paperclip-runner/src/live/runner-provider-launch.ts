@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { parseNativeRuntimeContext, retargetNativeSystemInstructions } from "../contracts/runtime-context.js";
 import { resolve } from "node:path";
 import { codexExecutableReadOnlyRoots } from "../drivers/codex/codex-security-config.js";
 import { createIsolatedCodexAppServerArgs } from "../drivers/codex/codex-app-server-driver.js";
@@ -10,6 +12,7 @@ import type { CapabilityRunnerdCodexTransportOptions } from "./runnerd-codex-tra
 
 /** Core's provider inputs. Executable paths and filesystem layout are supplied separately. */
 export interface RunnerProviderLaunchRequirements {
+  schema: "paperclip.runner.launch-requirements.v1";
   identity: DurableRecoveryIdentity;
   provider: NonNullable<CapabilityRunnerdCodexTransportOptions["provider"]>;
   model: string | null;
@@ -19,9 +22,118 @@ export interface RunnerProviderLaunchRequirements {
   includeCollaborationModeInstructions: boolean;
   settings: Pick<CapabilityRunnerdCodexTransportOptions,
     "acpxAgent" | "acpxMode" | "acpxPermissionMode" | "acpxPermissionModePinned" |
-    "piThinkingLevel" | "claudeEffort" | "managedProfile" | "agentCoreProfile">;
+    "piThinkingLevel" | "claudeEffort" | "managedProfile" | "agentCoreProfile" | "opencodePermissionMode">;
   instructions: string;
   runtimeContext: NativeRuntimeContextSnapshot | null;
+}
+
+/** A prepared descriptor belongs to one exact request and contains no launch secrets. */
+export interface PreparedRunnerProviderLaunch {
+  configurationId: string;
+  requirementsDigest: string;
+  provider: Record<string, unknown>;
+}
+
+export type RunnerLaunchPreparer = (
+  requirements: RunnerProviderLaunchRequirements,
+  recovery?: PreparedRunnerProviderLaunch,
+) => Promise<PreparedRunnerProviderLaunch>;
+
+export function runnerProviderLaunchRequirements(
+  options: CapabilityRunnerdCodexTransportOptions,
+  identity: DurableRecoveryIdentity,
+  params: Record<string, unknown>,
+  runtimeContext: NativeRuntimeContextSnapshot | null,
+  instructions: string,
+): RunnerProviderLaunchRequirements {
+  const requirements: RunnerProviderLaunchRequirements = {
+    schema: "paperclip.runner.launch-requirements.v1",
+    identity, provider: options.provider ?? "codex",
+    model: typeof params.model === "string" ? params.model : null,
+    instructions, runtimeContext,
+    settings: {
+      acpxAgent: options.acpxAgent, acpxMode: options.acpxMode,
+      acpxPermissionMode: options.acpxPermissionMode,
+      acpxPermissionModePinned: options.acpxPermissionModePinned,
+      piThinkingLevel: options.piThinkingLevel, claudeEffort: options.claudeEffort,
+      managedProfile: options.managedProfile, agentCoreProfile: options.agentCoreProfile,
+      opencodePermissionMode: options.opencodePermissionMode,
+    },
+    approvalPolicy: params.approvalPolicy === "on-request" || params.approvalPolicy === "untrusted"
+      ? params.approvalPolicy : "never",
+    readOnly: params.permissions === "paperclip-runner-workspace-read-only",
+    preparedConversation: params.conversationMode === "prepared",
+    includeCollaborationModeInstructions: (params.config as Record<string, unknown> | undefined)?.include_collaboration_mode_instructions !== false,
+  };
+  // PRP hashes strict JSON; absent settings must not remain undefined properties.
+  return JSON.parse(JSON.stringify(requirements)) as RunnerProviderLaunchRequirements;
+}
+
+/** Resolve assigned resource locations without changing their policy or content identities. */
+export function bindRunnerLaunchResources(
+  requirements: RunnerProviderLaunchRequirements,
+  context: NativeRuntimeContextSnapshot,
+): RunnerProviderLaunchRequirements {
+  const source = requirements.runtimeContext;
+  const target = parseNativeRuntimeContext(context);
+  if (!source || target.aggregateDigest !== source.aggregateDigest
+    || target.mcp.bindingId !== source.mcp.bindingId) {
+    throw new Error("runner_launch_resource_assignment_changed");
+  }
+  return { ...requirements,
+    instructions: retargetNativeSystemInstructions(requirements.instructions, source, target),
+    runtimeContext: target,
+  };
+}
+
+export function runnerLaunchRequirementsDigest(requirements: RunnerProviderLaunchRequirements): string {
+  const canonical = JSON.stringify(requirements, (_key, value: unknown) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : value);
+  return `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
+}
+
+/** The environment may resolve paths, but it cannot change Core's selected policy. */
+export function validatePreparedRunnerLaunch(
+  requirements: RunnerProviderLaunchRequirements,
+  prepared: PreparedRunnerProviderLaunch,
+): void {
+  const reject = () => { throw new Error("runner_prepared_launch_requirements_mismatch"); };
+  if (!prepared || typeof prepared.configurationId !== "string" || !prepared.configurationId.trim()
+    || prepared.configurationId.length > 1024
+    || prepared.requirementsDigest !== runnerLaunchRequirementsDigest(requirements)
+    || !prepared.provider || typeof prepared.provider !== "object") reject();
+  const descriptor = prepared.provider;
+  if (!requirements.runtimeContext && descriptor.runtimeContext != null) reject();
+  if (descriptor.kind !== requirements.provider || descriptor.model !== requirements.model) reject();
+  if (requirements.provider === "codex" && (descriptor.approvalPolicy !== requirements.approvalPolicy
+    || Boolean(descriptor.readOnly) !== requirements.readOnly)) reject();
+  if (requirements.provider === "acpx") {
+    const policy = descriptor.providerPolicy as Record<string, unknown> | undefined;
+    if (descriptor.agent !== (requirements.settings.acpxAgent ?? "codex")
+      || descriptor.permissionMode !== resolveRunnerdAcpxPermissionMode(requirements.settings.acpxPermissionMode)
+      || policy?.readOnly !== requirements.readOnly
+      || descriptor.runId !== requirements.identity.runId
+      || descriptor.normalizedSessionId !== requirements.identity.normalizedSessionId) reject();
+  }
+  const expected = createRunnerProviderLaunch(requirements, {
+    options: { codexArgs: [] }, root: "/", cwd: "/", codexHome: "/",
+    providerNodeCommand: "", opencodeProxyPath: "", acpxSidecarPath: "", codexCommand: "",
+  });
+  const hostFields = new Set(["command", "args", "sidecarCommand", "sidecarArgs", "runtimeDirectory", "cwd",
+    "preconfiguredHome", "externallySandboxed", "runtimeContext", "instructions"]);
+  for (const [key, value] of Object.entries(expected)) {
+    if (!hostFields.has(key) && JSON.stringify(value) !== JSON.stringify(descriptor[key])) reject();
+  }
+  let requiredInstructions = requirements.instructions;
+  if (requirements.runtimeContext) {
+    const context = parseNativeRuntimeContext(descriptor.runtimeContext);
+    if (context.aggregateDigest !== requirements.runtimeContext.aggregateDigest
+      || context.mcp.bindingId !== requirements.runtimeContext.mcp.bindingId) reject();
+    requiredInstructions = retargetNativeSystemInstructions(requiredInstructions, requirements.runtimeContext, context);
+  }
+  if (requiredInstructions.trim()
+    && (typeof descriptor.instructions !== "string" || !descriptor.instructions.includes(requiredInstructions.trim()))) reject();
 }
 
 /** Locations and provider settings resolved by the built-in execution environment. */
