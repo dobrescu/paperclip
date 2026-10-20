@@ -32,10 +32,16 @@ descriptor. The transport checks Core's selected profile and policy before
 registration and launch. Core still supplies authorized tools and completion
 criteria through PRP. A failed preparation does not enable a fallback launch.
 
-The transport saves the exact requirements and prepared configuration for
-recovery. Recovery within the same run must return the same configuration.
-A new run uses its current requirements. Provider session compatibility checks
-remain in their existing backends.
+The transport saves the exact requirements and prepared configuration in its
+private `launch-preparation.json` file. The file holds at most two records.
+A new attachment keeps the active run's record. Runner commands contain the
+provider descriptor once. They do not contain these recovery records.
+
+Recovery within the same run must return the same configuration. This rule also
+applies during an interrupted warm attachment. A new run uses its current
+requirements. Provider session compatibility checks remain in their existing
+backends. Close waits for preparation within its deadline. A timeout retains an
+unsettled checkpoint and prevents reuse.
 
 ## Plugin task protocol
 

@@ -1,4 +1,4 @@
-import { bindRunnerLaunchResources, createRunnerProviderLaunch, runnerLaunchRequirementsDigest } from "./runner-provider-launch.js";
+import { bindRunnerLaunchResources, createRunnerProviderLaunch, runnerLaunchRequirementsDigest, type PreparedRunnerProviderLaunch, type RunnerProviderLaunchRequirements } from "./runner-provider-launch.js";
 import { coldAdmissionTimeoutMs, waitForRunnerCommand } from "./runnerd-codex-transport.js";
 import {
   chmod,
@@ -2459,11 +2459,12 @@ it.each(["installed", "explicit"] as const)("records the selected %s Codex comma
   }
 });
 
-it.each(["reuse", "close-attachment", "timeout-attachment"] as const)("runs an environment-prepared descriptor without Core filesystem preparation (%s)", async mode => {
+it.each(["reuse", "large-instructions", "close-attachment", "timeout-attachment"] as const)("runs an environment-prepared descriptor without Core filesystem preparation (%s)", async mode => {
   const root = await mkdtemp(join(tmpdir(), "runner-environment-launch-"));
   const binary = defaultCapabilityRunnerdBinary();
   const artifact = { version: "0.3.0", digest: `sha256:${createHash("sha256").update(await readFile(binary)).digest("hex")}` };
   const context = assignedRuntimeContext("/controller-only/skill", "/controller-only/instructions");
+  const coreInstructions = composeNativeSystemInstructions(context, mode === "large-instructions" ? "x".repeat(200_000) : "Agent instructions");
   const resolved = structuredClone(context);
   resolved.instructions.bundle.rootPath = "/guest/.agents";
   resolved.skills[0]!.bundle.rootPath = "/guest/.agents/skills/assigned";
@@ -2489,7 +2490,7 @@ it.each(["reuse", "close-attachment", "timeout-attachment"] as const)("runs an e
     prepareLaunch: async (requirements, recovery) => {
       requestedRun = requirements.identity.runId;
       requestedInstructions = requirements.instructions;
-      if (requirements.identity.runId === "run-prepared-next" && mode !== "reuse") {
+      if (requirements.identity.runId === "run-prepared-next" && (mode === "close-attachment" || mode === "timeout-attachment")) {
         enterPreparation();
         await preparationGate;
       }
@@ -2522,11 +2523,15 @@ it.each(["reuse", "close-attachment", "timeout-attachment"] as const)("runs an e
   const { transport } = create();
   try {
     const opened = await transport.request("thread/start", { cwd: "/controller-only/workspace", model: "selected-model",
-      baseInstructions: composeNativeSystemInstructions(context, "Agent instructions"), dynamicTools: codexSemanticToolSpecs() });
+      baseInstructions: coreInstructions, dynamicTools: codexSemanticToolSpecs() });
     expect(opened.thread).toHaveProperty("id");
     expect(configuration).toMatchObject({ provider: { command: fakeCodex, cwd: root,
-      runtimeContext: { instructions: { bundle: { rootPath: "/guest/.agents" } } } },
-      preparedLaunch: { configurationId: "owned-run-prepared" } });
+      runtimeContext: { instructions: { bundle: { rootPath: "/guest/.agents" } } } } });
+    expect(configuration).not.toHaveProperty("preparedLaunch");
+    expect(configuration).not.toHaveProperty("launchRequirements");
+    expect(JSON.parse(await readFile(join(root, "launch-preparation.json"), "utf8")))
+      .toMatchObject({ entries: [{ prepared: { configurationId: "owned-run-prepared" },
+        requirements: { instructions: coreInstructions } }] });
     expect(JSON.stringify(configuration?.provider)).not.toContain("/controller-only/");
     expect(materialize).not.toHaveBeenCalled();
     expect(discover).not.toHaveBeenCalled();
@@ -2543,7 +2548,7 @@ it.each(["reuse", "close-attachment", "timeout-attachment"] as const)("runs an e
         runId: "run-prepared-next", turnId: "turn-prepared-next", itemId: "item-prepared-next",
       });
       void attaching.catch(() => undefined);
-      if (mode !== "reuse") {
+      if (mode === "close-attachment" || mode === "timeout-attachment") {
         await preparationStarted;
         await expect(resumed.transport.attachRun!({
           runId: "overlapping-run", turnId: "overlapping-turn", itemId: "overlapping-item",
@@ -2572,7 +2577,7 @@ it.each(["reuse", "close-attachment", "timeout-attachment"] as const)("runs an e
       }
       await attaching;
       expect(requestedRun).toBe("run-prepared-next");
-      expect(requestedInstructions).toBe(composeNativeSystemInstructions(context, "Agent instructions"));
+      expect(requestedInstructions).toBe(coreInstructions);
       await expect(resumed.transport.attachRun!({
         runId: "run-prepared-changed", turnId: "turn-prepared-changed", itemId: "item-prepared-changed",
         currentRunGrant: { runtimeContext: context, instructions: composeNativeSystemInstructions(context, "Next run instructions") },
@@ -6272,6 +6277,9 @@ it.each([
         },
       ]
     : []),
+  ...["before-result", "after-result", "after-activation", "after-confirmation"].map(lossPoint => ({
+    lossPoint, routed: true, recoveryFault: "none", executionPrepared: true,
+  })),
   {
     lossPoint: "after-result",
     routed: true,
@@ -6297,10 +6305,12 @@ it.each([
     ordinaryFollowup,
   })),
 ])(
-  "recovers a warm attachment with a fresh controller and runner ($lossPoint, routed=$routed, fault=$recoveryFault, followup=$ordinaryFollowup, external=$externalArtifact)",
+  "recovers a warm attachment with a fresh controller and runner ($lossPoint, routed=$routed, fault=$recoveryFault, followup=$ordinaryFollowup, external=$externalArtifact, prepared=$executionPrepared)",
   async (testCase) => {
     const { lossPoint, routed, recoveryFault } = testCase;
     const externalArtifact = "externalArtifact" in testCase && testCase.externalArtifact;
+    const executionPrepared = "executionPrepared" in testCase && testCase.executionPrepared;
+    const configurations = new Map<string, { requirements: RunnerProviderLaunchRequirements; prepared: PreparedRunnerProviderLaunch }>();
     const ordinaryFollowup =
       "ordinaryFollowup" in testCase && testCase.ordinaryFollowup;
     const snapshotFault =
@@ -6423,9 +6433,10 @@ it.each([
     const launchSpy = vi
       .spyOn(durableControlPlane, "spawnRunner")
       .mockImplementation((options) => {
-        const handle = launch(externalArtifact && recovering
-          ? { ...options, runnerBinaryPath: defaultCapabilityRunnerdBinary() }
-          : options);
+        const handle = launch({ ...options,
+          ...(executionPrepared ? { processLauncher: undefined } : {}),
+          ...(externalArtifact && recovering ? { runnerBinaryPath: defaultCapabilityRunnerdBinary() } : {}),
+        });
         handles.push(handle);
         return handle;
       });
@@ -6542,6 +6553,30 @@ it.each([
             warmTransitionRegistrationMode: "routed_connect" as const,
           }
         : {}),
+      ...(executionPrepared ? {
+        runnerArtifact: readRunnerdArtifactBinding(defaultCapabilityRunnerdBinary()),
+        readRunnerState: async () => JSON.parse(await readFile(join(stateDirectory, "runner/runner-state.json"), "utf8")),
+        // The fixture's spawn spy supplies the real local process owner.
+        runnerProcessLauncher: () => { throw new Error("fixture process owner was bypassed"); },
+        prepareLaunch: async (requirements: RunnerProviderLaunchRequirements, recovery?: PreparedRunnerProviderLaunch) => {
+          const existing = configurations.get(requirements.identity.runId);
+          if (existing) {
+            expect(requirements).toEqual(existing.requirements);
+            if (recovering) expect(recovery).toEqual(existing.prepared);
+            return existing.prepared;
+          }
+          const prepared = { configurationId: `prepared-${requirements.identity.runId}`,
+            requirementsDigest: runnerLaunchRequirementsDigest(requirements),
+            provider: createRunnerProviderLaunch(requirements, {
+              options: { codexArgs: fakeCodexArgs(stateDirectory, "--call-log", callsPath, "--record-process-start") },
+              root: stateDirectory, cwd: tmpdir(), codexHome: join(stateDirectory, "codex-home"),
+              codexCommand: fakeCodex, providerNodeCommand: process.execPath, opencodeProxyPath: "", acpxSidecarPath: "",
+            }),
+          };
+          configurations.set(requirements.identity.runId, { requirements: structuredClone(requirements), prepared });
+          return prepared;
+        },
+      } : {}),
     };
     const first = createCapabilityRunnerdCodexTransport(options);
     let resumed:

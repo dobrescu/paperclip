@@ -32,6 +32,7 @@ const sources = {
   nativeBackendFactorySourceSha256: "src/backends/native-backend-factory.ts",
   nativeInstructionsSourceSha256: "src/backends/runtime-context.ts",
   providerLaunchSourceSha256: "src/live/runner-provider-launch.ts",
+  launchPreparationStoreSourceSha256: "src/live/runner-launch-preparation-store.ts",
   runtimeRequestBridgeSourceSha256: "src/live/runnerd-codex-transport.ts",
   runtimeRequestFacadeSourceSha256: "src/drivers/codex/codex-session-notifications.ts",
   runtimeRequestNotificationSourceSha256: "src/drivers/codex/codex-thread-normalization.ts",

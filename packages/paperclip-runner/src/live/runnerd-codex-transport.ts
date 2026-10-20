@@ -1,3 +1,4 @@
+import { RunnerLaunchPreparationStore } from "./runner-launch-preparation-store.js";
 import type { PreparedRunnerProviderLaunch, RunnerProviderLaunchRequirements } from "./runner-provider-launch.js";
 import { validatePreparedRunnerLaunch, runnerProviderLaunchRequirements, createRunnerProviderLaunch, createRunnerdCodexAppServerArgs, trustedRuntimeReadOnlyRoots } from "./runner-provider-launch.js";
 export { createRunnerdCodexAppServerArgs, resolveRunnerdAcpxPermissionMode, trustedRuntimeReadOnlyRoots, withCodexCollaborationRuntimeInstructions } from "./runner-provider-launch.js";
@@ -4129,7 +4130,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           );
       if (this.options.prepareLaunch) {
         const priorProvider = record(runAttachTemplate.provider);
-        const priorRequirements = runAttachTemplate.launchRequirements as RunnerProviderLaunchRequirements | undefined;
+        const priorRequirements = new RunnerLaunchPreparationStore(this.#root).load(prior)?.requirements;
         await this.#prepareOwnedProvider(runAttachTemplate, desired,
           currentRunGrant ? currentRunGrant.runtimeContext : priorRequirements?.runtimeContext
             ?? priorProvider.runtimeContext as NativeRuntimeContextSnapshot | null,
@@ -4747,12 +4748,12 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       || commandDigest(requirements.identity) !== commandDigest(identity)) {
       throw new Error("runner_launch_recovery_requirements_unavailable");
     }
+    this.#assertStartupOpen();
     const prepared = await this.options.prepareLaunch!(requirements, recovery);
     validatePreparedRunnerLaunch(requirements, prepared);
     this.#assertStartupOpen();
     template.provider = prepared.provider;
-    template.preparedLaunch = prepared;
-    template.launchRequirements = structuredClone(requirements);
+    new RunnerLaunchPreparationStore(this.#root).save(requirements, prepared, this.#core!.store.state.identity);
     return prepared;
   }
 
@@ -4769,12 +4770,13 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       const prepared = await this.options.prepareLaunch(requirements);
       validatePreparedRunnerLaunch(requirements, prepared);
       this.#assertStartupOpen();
+      new RunnerLaunchPreparationStore(this.#root).save(requirements, prepared, this.#core!.store.state.identity);
       const completionContract = record(params.completionContract);
       return {
         runAttachTemplate: { observeCredentials: this.options.observeCredentials !== false,
           authorizedTools: this.#authorizedTools,
           ...(completionContract.revision && Array.isArray(completionContract.criterionIds) ? { completionContract } : {}),
-          provider: prepared.provider, preparedLaunch: prepared, launchRequirements: requirements },
+          provider: prepared.provider },
         runnerAcpxLaunchProfile: undefined, runnerOpenCodeLaunchProfile: undefined,
         environment: {},
       };
@@ -5144,6 +5146,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       this.options.readRunnerState &&
       controlPlaneState &&
       (controlPlaneState.warmTransition !== undefined ||
+        controlPlaneState.completedWarmTransition !== undefined ||
         controlPlaneState.schema ===
           "paperclip.runner.durable.control-plane-state.warm-transition.v1" ||
         (Array.isArray(controlPlaneState.commands) &&
@@ -5427,27 +5430,33 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     });
     this.#core = core;
     let environmentPrepared: PreparedRunnerProviderLaunch | undefined;
-    let environmentRequirements: unknown;
     if (this.options.prepareLaunch) {
-      const template = rotatedRunAttachPayload(controlPlaneState!, desiredIdentity, this.#authorizedTools,
-        this.options.resumeCompletionContract);
-      const prior = record(controlPlaneState!.runAttachTemplate);
-      if (exactAuthority && (!prior.launchRequirements || !prior.preparedLaunch)) {
+      const preparations = new RunnerLaunchPreparationStore(this.#root);
+      const saved = preparations.load(desiredIdentity);
+      const previous = preparations.load(controlPlaneIdentity(controlPlaneState!));
+      if ((exactAuthority || warmRecovery !== null) && !saved) {
         throw new Error("runner_launch_recovery_requirements_unavailable");
       }
-      environmentPrepared = await this.#prepareOwnedProvider(template, desiredIdentity,
-        this.options.runtimeContext ?? null,
-        this.options.baseInstructions ?? String(record(template.provider).instructions ?? ""),
-        exactAuthority ? prior.preparedLaunch as PreparedRunnerProviderLaunch | undefined : undefined,
-        exactAuthority ? prior.launchRequirements as RunnerProviderLaunchRequirements | undefined : undefined);
-      environmentRequirements = template.launchRequirements;
-      if (exactAuthority) {
-        const recorded = record(prior.preparedLaunch);
-        if (recorded.configurationId !== environmentPrepared.configurationId
-          || commandDigest(prior.provider) !== commandDigest(environmentPrepared.provider)) {
+      const { paperclipNextAuthority: _authority, ...savedAttachment } =
+        warmRecovery ? core.getCommand(warmRecovery.commandId)!.payload : {};
+      const template = warmRecovery ? structuredClone(savedAttachment)
+        : rotatedRunAttachPayload(controlPlaneState!, desiredIdentity, this.#authorizedTools,
+          this.options.resumeCompletionContract);
+      if (saved) {
+        const recordedProvider = warmRecovery
+          ? core.getCommand(warmRecovery.commandId)?.payload.provider
+          : exactAuthority ? record(controlPlaneState!.runAttachTemplate).provider : undefined;
+        if ((exactAuthority || warmRecovery !== null)
+          && (recordedProvider === undefined || commandDigest(recordedProvider) !== commandDigest(saved.prepared.provider))) {
           throw new Error("runner_prepared_launch_recovery_changed");
         }
+        template.provider = saved.prepared.provider;
       }
+      environmentPrepared = await this.#prepareOwnedProvider(template, desiredIdentity,
+        this.options.runtimeContext ?? previous?.requirements.runtimeContext ?? null,
+        this.options.baseInstructions ?? previous?.requirements.instructions ?? String(record(template.provider).instructions ?? ""),
+        saved?.prepared, saved?.requirements);
+      this.#runAttachTemplate = structuredClone(template);
     }
     if (rotatedAuthority) {
       if (provider === "acpx" && this.options.acpxAgent === "copilot"
@@ -5494,8 +5503,6 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       }
       if (environmentPrepared) {
         runAttachTemplate.provider = environmentPrepared.provider;
-        runAttachTemplate.preparedLaunch = environmentPrepared;
-        runAttachTemplate.launchRequirements = environmentRequirements;
       }
       this.#runAttachTemplate = structuredClone(runAttachTemplate);
       core.queueCommand("run.attach", runAttachTemplate);
