@@ -173,6 +173,11 @@ export async function preparePluginWorkspace(
           ),
         )
     : [];
+  if (
+    existing?.metadata?.workspaceProviderRetired === true ||
+    existing?.metadata?.workspaceProviderRemoval
+  )
+    throw conflict("Workspace storage is retired or awaiting cleanup");
   const saved = readWorkspaceProviderBinding(existing?.metadata);
   const projectId = saved?.projectId ?? input.projectId;
   const [project] = projectId
@@ -216,7 +221,21 @@ export async function preparePluginWorkspace(
     throw conflict(
       "An existing local workspace cannot change storage providers",
     );
-  await provider(db, workers, input.companyId, pluginId);
+  const selectedProvider = await provider(
+    db,
+    workers,
+    input.companyId,
+    pluginId,
+  );
+  const declaration = selectedProvider.manifestJson.workspaceProvider!;
+  if (
+    !declaration.modes.includes(input.mode as "isolated_workspace") ||
+    !declaration.strategies.includes(input.strategy as "git_worktree")
+  ) {
+    throw conflict(
+      "The storage plugin does not support this workspace mode or strategy",
+    );
+  }
   const actor = {
     type: "agent" as const,
     source: "agent_jwt" as const,
@@ -384,6 +403,8 @@ export async function preparePluginWorkspace(
     if (
       !current ||
       !["active", "idle", "in_review"].includes(current.status) ||
+      current.metadata?.workspaceProviderRetired === true ||
+      current.metadata?.workspaceProviderRemoval ||
       current.providerRef !== workspace.providerRef ||
       (current.metadata?.lifecycleGeneration ?? 0) !==
         (workspace.metadata?.lifecycleGeneration ?? 0)
@@ -523,12 +544,11 @@ async function reconcilePluginWorkspaceReservation(
   return updated;
 }
 
-export async function inspectPluginWorkspace(
+async function inspectBinding(
   db: Db,
   workers: WorkspaceWorkers | undefined,
   workspace: Workspace,
 ) {
-  workspace = await reconcilePluginWorkspaceReservation(db, workers, workspace);
   const binding = readWorkspaceProviderBinding(workspace.metadata);
   if (!binding) throw conflict("Workspace storage binding is unavailable");
   const result = await callWorkspaceProvider(db, workers, {
@@ -540,6 +560,91 @@ export async function inspectPluginWorkspace(
   return result;
 }
 
+export async function inspectPluginWorkspace(
+  db: Db,
+  workers: WorkspaceWorkers | undefined,
+  workspace: Workspace,
+) {
+  return db.transaction(async (tx) => {
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`execution_workspace_lifecycle:${workspace.id}`}, 0))`,
+    );
+    // Keep recovery intent/results durable across an ambiguous provider response.
+    workspace = await reconcilePluginWorkspaceReservation(
+      db,
+      workers,
+      workspace,
+    );
+    if (workspace.metadata?.workspaceProviderRemoval)
+      workspace = await finishPendingRemoval(db, workers, workspace);
+    if (workspace.metadata?.workspaceProviderRemoved === true)
+      return removedInspection();
+    return inspectBinding(db, workers, workspace);
+  });
+}
+
+const removedInspection = () => ({
+  kind: "inspection" as const,
+  headSha: null,
+  branchName: null,
+  hasDirtyTrackedFiles: false,
+  hasUntrackedFiles: false,
+  hasLocalOnlyData: false,
+  isMergedIntoBase: null,
+  remotelyRecoverable: true,
+});
+
+/** Replay the recorded delete before trying to inspect a checkout that may already be gone. */
+async function finishPendingRemoval(
+  db: Db,
+  workers: WorkspaceWorkers | undefined,
+  workspace: Workspace,
+): Promise<Workspace> {
+  if (workspace.metadata?.workspaceProviderRemoved === true) return workspace;
+  const pending = workspace.metadata?.workspaceProviderRemoval as
+    | { generation?: unknown; operation?: unknown }
+    | undefined;
+  const parsed = workspaceProviderOperationSchema.safeParse(pending?.operation);
+  const binding = readWorkspaceProviderBinding(workspace.metadata);
+  if (
+    !parsed.success ||
+    parsed.data.kind !== "remove" ||
+    pending?.generation !== (workspace.metadata?.lifecycleGeneration ?? 0) ||
+    JSON.stringify(parsed.data.binding) !== JSON.stringify(binding)
+  )
+    throw conflict("Workspace removal intent is unavailable or stale");
+  const result = await callWorkspaceProvider(db, workers, {
+    workspace,
+    operation: parsed.data,
+  });
+  if (result.kind !== "removed")
+    throw conflict("Workspace removal is incomplete");
+  const [updated] = await db
+    .update(executionWorkspaces)
+    .set({
+      ...(workspace.status === "cleanup_failed"
+        ? { status: "archived", cleanupReason: null }
+        : {}),
+      metadata: {
+        ...workspace.metadata,
+        workspaceProviderRemoval: null,
+        workspaceProviderRemoved: true,
+      },
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(executionWorkspaces.id, workspace.id),
+        eq(executionWorkspaces.companyId, workspace.companyId),
+        sql`coalesce((${executionWorkspaces.metadata}->>'lifecycleGeneration')::int, 0) = ${pending!.generation}`,
+      ),
+    )
+    .returning();
+  if (!updated)
+    throw conflict("Workspace changed during removal reconciliation");
+  return updated;
+}
+
 export async function removePluginWorkspace(
   db: Db,
   workers: WorkspaceWorkers | undefined,
@@ -547,9 +652,14 @@ export async function removePluginWorkspace(
   expectedHeadSha: string | null,
 ) {
   workspace = await reconcilePluginWorkspaceReservation(db, workers, workspace);
+  if (workspace.metadata?.workspaceProviderRemoved === true) return;
+  if (workspace.metadata?.workspaceProviderRemoval) {
+    await finishPendingRemoval(db, workers, workspace);
+    return;
+  }
   const binding = readWorkspaceProviderBinding(workspace.metadata);
   if (!binding) throw conflict("Workspace storage binding is unavailable");
-  const inspection = await inspectPluginWorkspace(db, workers, workspace);
+  const inspection = await inspectBinding(db, workers, workspace);
   if (
     inspection.hasDirtyTrackedFiles ||
     inspection.hasUntrackedFiles ||
@@ -562,34 +672,38 @@ export async function removePluginWorkspace(
       "Workspace has local changes or cannot be recovered remotely",
     );
   }
-  const result = await callWorkspaceProvider(db, workers, {
-    workspace,
-    operation: { kind: "remove", binding, expectedHeadSha },
-  });
-  if (result.kind !== "removed")
-    throw conflict("Workspace removal is incomplete");
-  await db
+  const generation = workspace.metadata?.lifecycleGeneration ?? 0;
+  const operation = { kind: "remove" as const, binding, expectedHeadSha };
+  const [pending] = await db
     .update(executionWorkspaces)
     .set({
-      metadata: { ...workspace.metadata, workspaceProviderRemoved: true },
+      metadata: {
+        ...workspace.metadata,
+        workspaceProviderRemoval: { generation, operation },
+      },
       updatedAt: new Date(),
     })
     .where(
       and(
         eq(executionWorkspaces.id, workspace.id),
         eq(executionWorkspaces.companyId, workspace.companyId),
-        sql`coalesce((${executionWorkspaces.metadata}->>'lifecycleGeneration')::int, 0) = ${workspace.metadata?.lifecycleGeneration ?? 0}`,
+        sql`coalesce((${executionWorkspaces.metadata}->>'lifecycleGeneration')::int, 0) = ${generation}`,
+        eq(executionWorkspaces.providerRef, binding.workspaceRef),
       ),
-    );
+    )
+    .returning();
+  if (!pending)
+    throw conflict("Workspace changed before removal could be recorded");
+  await finishPendingRemoval(db, workers, pending);
 }
 
-/** Source and owner changes cannot silently redirect a persisted provider binding. */
-export async function assertNoPluginWorkspaceDependents(
+/** An authorized storage edit atomically retires closed, removed dependencies under the reopen fence. */
+export async function retireRemovedPluginWorkspaceDependents(
   db: Db,
   projectId: string,
   sourceId?: string,
 ) {
-  const [row] = await db
+  const rows = await db
     .select({ id: executionWorkspaces.id })
     .from(executionWorkspaces)
     .where(
@@ -600,12 +714,32 @@ export async function assertNoPluginWorkspaceDependents(
           ? eq(executionWorkspaces.projectWorkspaceId, sourceId)
           : undefined,
       ),
-    )
-    .limit(1);
-  if (row)
-    throw conflict(
-      "Retire managed execution workspaces before changing their storage owner or repository source",
     );
+  for (const { id } of rows.sort((a, b) => a.id.localeCompare(b.id))) {
+    await db.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`execution_workspace_lifecycle:${id}`}, 0))`,
+    );
+    const [row] = await db
+      .select()
+      .from(executionWorkspaces)
+      .where(eq(executionWorkspaces.id, id));
+    if (!row || row.metadata?.workspaceProviderRetired === true) continue;
+    if (
+      row.metadata?.workspaceProviderRemoved !== true ||
+      !["archived", "cleanup_failed"].includes(row.status)
+    ) {
+      throw conflict(
+        "Retire managed execution workspaces before changing their storage owner or repository source",
+      );
+    }
+    await db
+      .update(executionWorkspaces)
+      .set({
+        metadata: { ...row.metadata, workspaceProviderRetired: true },
+        updatedAt: new Date(),
+      })
+      .where(eq(executionWorkspaces.id, row.id));
+  }
 }
 
 /** Called inside Core's existing lifecycle fence after task authorization. */
@@ -615,6 +749,10 @@ export async function restorePluginWorkspace(
   workspace: Workspace,
 ) {
   workspace = await reconcilePluginWorkspaceReservation(db, workers, workspace);
+  if (workspace.metadata?.workspaceProviderRetired === true)
+    throw conflict("Workspace storage was retired");
+  if (workspace.metadata?.workspaceProviderRemoval)
+    workspace = await finishPendingRemoval(db, workers, workspace);
   const binding = readWorkspaceProviderBinding(workspace.metadata);
   const source = workspace.metadata?.workspaceProviderSource;
   if (!binding || !source)
@@ -629,6 +767,31 @@ export async function restorePluginWorkspace(
     baseRef: workspace.baseRef,
     existing: binding,
   });
+  const [pending] = await db
+    .update(executionWorkspaces)
+    .set({
+      metadata: {
+        ...workspace.metadata,
+        workspaceProviderRemoved: false,
+        workspaceProviderRestoration: {
+          generation:
+            ((workspace.metadata?.lifecycleGeneration as number) ?? 0) + 1,
+          operation,
+        },
+      },
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(executionWorkspaces.id, workspace.id),
+        eq(executionWorkspaces.companyId, workspace.companyId),
+        sql`coalesce((${executionWorkspaces.metadata}->>'lifecycleGeneration')::int, 0) = ${workspace.metadata?.lifecycleGeneration ?? 0}`,
+      ),
+    )
+    .returning();
+  if (!pending)
+    throw conflict("Workspace changed before restoration could be recorded");
+  workspace = pending;
   const result = await callWorkspaceProvider(db, workers, {
     workspace,
     operation,
@@ -640,6 +803,7 @@ export async function restorePluginWorkspace(
     ...workspace.metadata,
     workspaceProvider: result.binding,
     workspaceProviderRemoved: false,
+    workspaceProviderRestoration: null,
     workspaceProviderBaseSha: result.baseSha,
   };
 }

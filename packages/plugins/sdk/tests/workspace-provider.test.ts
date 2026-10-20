@@ -95,7 +95,10 @@ describe("workspace provider SDK", () => {
       author: "Test",
       categories: ["workspace"],
       entrypoints: { worker: "./worker.js" },
-      workspaceProvider: true,
+      workspaceProvider: {
+        modes: ["isolated_workspace", "operator_branch"],
+        strategies: ["git_worktree"],
+      },
       capabilities: ["workspaces.manage", "events.subscribe"],
       resourceLifecycle: ["project"],
     };

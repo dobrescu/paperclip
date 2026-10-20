@@ -1308,7 +1308,8 @@ request cleanup. See [the distribution and lifecycle contract](../../../doc/plug
 
 ## Project storage and task workspaces
 
-A storage provider declares `workspaceProvider: true`, `workspaces.manage`, and
+A storage provider declares `workspaceProvider: { modes: ["isolated_workspace"],
+strategies: ["git_worktree"] }`, `workspaces.manage`, and
 `resourceLifecycle: ["project"]` (with `events.subscribe`). The same plugin must
 implement `onResourceLifecycle` and `onWorkspaceOperation`. Project lifecycle
 creates and retains the storage; workspace operations manage task checkouts in
@@ -1328,7 +1329,8 @@ operations; the operation ID identifies a retry of the same request.
 
 - `prepare` creates or restores the checkout. It returns an opaque, durable
   `WorkspaceProviderBinding`, a branch, and the starting commit. `branchMode:
-  "existing"` must never create or reset a branch. Retried preparation must keep
+  "existing"` must use an existing logical branch and must never reset its history.
+  A provider may materialize a local ref from a confirmed existing remote branch. Retried preparation must keep
   local work. Providers may reject modes or strategies they do not support.
 - `inspect` reports tracked, untracked, and ignored/local-only changes, the
   current commit, merge state, and whether remote storage can recover it. Use
@@ -1343,7 +1345,8 @@ stores no local `cwd` for managed rows. `/workspaces/<id>` is a logical path in
 Core's existing run metadata; Core must not use it for filesystem access.
 
 For the initial execution integration, select a task-capable environment driver
-from the same plugin. Core pins the binding on the environment lease and supplies
+from the same plugin. Core validates declared modes and strategies before it
+reserves a workspace. Core pins the binding on the environment lease and supplies
 it as `PluginEnvironmentTaskParams.workspace`. The execution hook resolves the
 provider reference to guest mounts and the actual working directory. Core rejects
 an execution driver from a different plugin. Native execution also requires the
@@ -1354,7 +1357,10 @@ storage and execution interfaces.
 Core's existing archive, reopen, and terminal cleanup fences also cover provider
 workspaces. The plugin must prevent project storage retirement while its task
 workspaces still contain local data. Repository source and storage owner changes
-are blocked while retained managed workspaces depend on them. File browsing and
+are blocked while live managed workspaces depend on them. An authorized storage
+owner or source edit retires closed workspaces whose provider removal is confirmed;
+retired records cannot reopen. Pending deletion is replayed before inspection,
+including after a lost removal result. File browsing and
 other Core-host filesystem operations are unavailable for managed storage.
 
 Use `createWorkspaceProviderHarness` from `@paperclipai/plugin-sdk/testing` to

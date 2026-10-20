@@ -264,7 +264,7 @@ function preserveWorkspaceMetadataForPatch(
     }
     if (patch.metadata !== undefined) {
       nextPatch.metadata = { ...patch.metadata };
-      for (const key of ["workspaceProvider", "workspaceProviderOwner", "workspaceProviderSource", "workspaceProviderBaseSha", "workspaceProviderRemoved", "workspaceProviderBranchMode", "lifecycleGeneration", "reopenPendingConsumption", "reopenPendingConsumptionSince"] as const) {
+      for (const key of ["workspaceProvider", "workspaceProviderOwner", "workspaceProviderSource", "workspaceProviderBaseSha", "workspaceProviderRemoved", "workspaceProviderBranchMode", "workspaceProviderRemoval", "workspaceProviderRetired", "workspaceProviderRestoration", "lifecycleGeneration", "reopenPendingConsumption", "reopenPendingConsumptionSince"] as const) {
         if (current.metadata?.[key] !== undefined) nextPatch.metadata[key] = current.metadata[key];
         else delete nextPatch.metadata[key];
       }
@@ -1400,7 +1400,9 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     if (workspace.providerType !== "plugin") return inspectGitCloseReadiness(workspace);
     const [row] = await db.select().from(executionWorkspaces).where(and(eq(executionWorkspaces.id, workspace.id), eq(executionWorkspaces.companyId, workspace.companyId)));
     if (!row) throw notFound("Workspace is unavailable");
-    const state = await inspectPluginWorkspace(db, opts.pluginWorkerManager, row);
+    let state;
+    try { state = await inspectPluginWorkspace(db, opts.pluginWorkerManager, row); }
+    catch { return { statusInspectionSucceeded: false, warnings: ["Workspace storage inspection is unavailable; data was retained."], git: null }; }
     return { statusInspectionSucceeded: true, warnings: [], git: {
       repoRoot: `/workspaces/${workspace.id}`, workspacePath: `/workspaces/${workspace.id}`,
       branchName: state.branchName, baseRef: workspace.baseRef,
@@ -3225,6 +3227,8 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       const baseCandidateFilter = and(
         sql<boolean>`${executionWorkspaces.sourceIssueId} IS NOT NULL`,
         or(and(inArray(executionWorkspaces.status, ["active", "idle", "in_review"]), isNull(executionWorkspaces.closedAt)),
+          and(eq(executionWorkspaces.providerType, "plugin"), inArray(executionWorkspaces.status, ["archived", "cleanup_failed"]),
+            sql`${executionWorkspaces.metadata}->'workspaceProviderRemoval' IS NOT NULL AND ${executionWorkspaces.metadata}->'workspaceProviderRemoval' <> 'null'::jsonb`),
           opts.gitCacheExpirationEnabled ? and(inArray(executionWorkspaces.status, ["archived", "cleanup_failed"]),
             sql`${executionWorkspaces.metadata}->'gitCacheExpiration'->>'completed' = 'false'`) : undefined),
       );
@@ -3762,12 +3766,12 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           await acquireExecutionWorkspaceLifecycleLock(tx, snapshot.id);
           const [row] = await tx.select().from(executionWorkspaces).where(and(
             eq(executionWorkspaces.id, snapshot.id), eq(executionWorkspaces.companyId, issue.companyId)));
-          if (!row || row.sourceIssueId !== sourceIssueId) return { ok: false, code: "not_reopenable", message: "Workspace source changed" };
+          if (!row || row.sourceIssueId !== sourceIssueId || row.metadata?.workspaceProviderRetired === true) return { ok: false, code: "not_reopenable", message: "Workspace source changed" };
           await assertTaskWorkspaceExecutionAccess(tx, input.authorizationActor, issue.companyId, { issueId: issue.id, workspaceId: row.id });
           const generation = readExecutionWorkspaceLifecycleGeneration(row.metadata);
           if (!isClosedExecutionWorkspaceStatus(row.status)) return { ok: true, reopened: false, workspace: toExecutionWorkspace(row), generation };
           try {
-            const metadata = await restorePluginWorkspace(tx as unknown as Db, opts.pluginWorkerManager, row);
+            const metadata = await restorePluginWorkspace(db, opts.pluginWorkerManager, row);
             const [active] = await tx.update(executionWorkspaces).set({ status: "active", closedAt: null,
               cleanupReason: null, cleanupEligibleAt: null, lastUsedAt: now(), updatedAt: now(),
               metadata: setMetadataReopenPendingConsumption(bumpExecutionWorkspaceLifecycleGeneration(metadata), now()),

@@ -98,7 +98,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     const { input, source, issue } = await fixture(true);
     const [plugin] = await db.insert(plugins).values({ pluginKey: "test.managed-storage", packageName: "test-storage", version: "1.0.0", apiVersion: 1, status: "ready", categories: ["workspace"],
       manifestJson: { id: "test.managed-storage", apiVersion: 1, version: "1.0.0", displayName: "Storage", description: "Storage", author: "Test", categories: ["workspace"],
-        workspaceProvider: true, capabilities: ["workspaces.manage", "events.subscribe"], resourceLifecycle: ["project"], entrypoints: { worker: "./worker.js" } } }).returning();
+        workspaceProvider: { modes: ["isolated_workspace", "operator_branch"], strategies: ["git_worktree"] }, capabilities: ["workspaces.manage", "events.subscribe"], resourceLifecycle: ["project"], entrypoints: { worker: "./worker.js" } } }).returning();
     await db.update(projects).set({ executionWorkspacePolicy: { enabled: true, storageProviderPluginId: plugin.id } }).where(eq(projects.id, issue.projectId!));
     await db.update(projectWorkspaces).set({ cwd: null, sourceType: "remote_managed", repoUrl: "https://github.com/example/repo.git" }).where(eq(projectWorkspaces.id, issue.projectWorkspaceId!));
     await rm(source, { recursive: true });

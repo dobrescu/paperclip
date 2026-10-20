@@ -1,4 +1,4 @@
-import { assertNoPluginWorkspaceDependents } from "./plugin-workspaces.js";
+import { retireRemovedPluginWorkspaceDependents } from "./plugin-workspaces.js";
 import { enqueueProjectSkillSource, detachProjectSkillSource } from "./project-skill-source-bindings.js";
 import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -973,7 +973,7 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
       if (!existingProject) return null;
       if (projectData.executionWorkspacePolicy !== undefined &&
           projectData.executionWorkspacePolicy?.storageProviderPluginId !== existingProject.executionWorkspacePolicy?.storageProviderPluginId) {
-        await assertNoPluginWorkspaceDependents(db, id);
+        await retireRemovedPluginWorkspaceDependents(db, id);
       }
       if (ids && ids.length > 0) {
         await assertGoalsBelongToCompany(db, existingProject.companyId, ids);
@@ -1206,7 +1206,7 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
       if (!existing) return null;
       if (["repoUrl", "repoRef", "defaultRef", "sourceType", "remoteProvider", "remoteWorkspaceRef"].some(key =>
           key in data && data[key as keyof typeof data] !== existing[key as keyof typeof existing])) {
-        await assertNoPluginWorkspaceDependents(db, projectId, workspaceId);
+        await retireRemovedPluginWorkspaceDependents(db, projectId, workspaceId);
       }
 
       const nextCwd =
@@ -1365,7 +1365,7 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
         .for("update")
         .then((rows) => rows[0] ?? null);
       if (!existing) return null;
-      await assertNoPluginWorkspaceDependents(db, projectId, workspaceId);
+      await retireRemovedPluginWorkspaceDependents(db, projectId, workspaceId);
 
       const removed = await db.transaction(async (tx) => {
         await detachProjectSkillSource(tx as unknown as Db, existing.companyId, workspaceId);

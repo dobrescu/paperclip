@@ -692,7 +692,10 @@ export interface PaperclipPluginManifestV1 {
   /** Required participant in agent preparation, stop, resume, and cleanup. */
   agentLifecycle?: true;
   /** Own project storage and durable workspace operations as one contract. */
-  workspaceProvider?: true;
+  workspaceProvider?: {
+    modes: Array<"shared_workspace" | "isolated_workspace" | "operator_branch">;
+    strategies: Array<"project_primary" | "git_worktree">;
+  };
   /** Durable, acknowledged resource events delivered to onResourceLifecycle. Requires events.subscribe. */
   resourceLifecycle?: Array<"agent" | "project" | "agent_runtime">;
   /** Opt into the native pooled-connection catalog, setup, and management UI. */

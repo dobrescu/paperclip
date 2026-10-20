@@ -80,7 +80,10 @@ const support = await getEmbeddedPostgresTestSupport();
           categories: ["workspace"],
           capabilities: ["workspaces.manage", "events.subscribe"],
           resourceLifecycle: ["project"],
-          workspaceProvider: true,
+          workspaceProvider: {
+            modes: ["isolated_workspace", "operator_branch"],
+            strategies: ["git_worktree"],
+          },
           entrypoints: { worker: "./worker.js" },
         },
       });
@@ -123,7 +126,9 @@ const support = await getEmbeddedPostgresTestSupport();
       });
       const calls: any[] = [];
       let loseResponse = false,
-        dirty = false;
+        dirty = false,
+        removed = false,
+        loseRemovalResponse = false;
       const workers = {
         getWorker: () => ({ supportedMethods: ["workspaceOperation"] }),
         call: async (_id: string, method: string, params: any) => {
@@ -134,7 +139,8 @@ const support = await getEmbeddedPostgresTestSupport();
             loseResponse = false;
             throw new Error("lost result");
           }
-          if (params.operation.kind === "prepare")
+          if (params.operation.kind === "prepare") {
+            removed = false;
             return {
               kind: "prepared",
               binding: {
@@ -150,7 +156,9 @@ const support = await getEmbeddedPostgresTestSupport();
               created: true,
               branchCreatedByRuntime: true,
             };
-          if (params.operation.kind === "inspect")
+          }
+          if (params.operation.kind === "inspect") {
+            if (removed) throw new Error("checkout missing");
             return {
               kind: "inspection",
               headSha: "a".repeat(40),
@@ -161,6 +169,12 @@ const support = await getEmbeddedPostgresTestSupport();
               isMergedIntoBase: true,
               remotelyRecoverable: true,
             };
+          }
+          removed = true;
+          if (loseRemovalResponse) {
+            loseRemovalResponse = false;
+            throw new Error("lost removal response");
+          }
           return { kind: "removed" };
         },
       } as unknown as WorkspaceWorkers;
@@ -185,6 +199,9 @@ const support = await getEmbeddedPostgresTestSupport();
         input,
         calls,
         workers,
+        loseRemoval: () => {
+          loseRemovalResponse = true;
+        },
         lose: () => {
           loseResponse = true;
         },
@@ -383,6 +400,225 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(f.calls.at(-1).operation.existing.workspaceRef).toBe(
         workspace!.providerRef,
       );
+    });
+    it("replays a durable removal after a lost result without inspecting the missing checkout", async () => {
+      const f = await fixture();
+      const workspace = await preparePluginWorkspace(db, f.workers, f.input);
+      f.loseRemoval();
+      await expect(
+        removePluginWorkspace(db, f.workers, workspace!, "a".repeat(40)),
+      ).rejects.toThrow("incomplete");
+      const inspections = f.calls.filter(
+        (call) => call.operation.kind === "inspect",
+      ).length;
+      await removePluginWorkspace(db, f.workers, workspace!, null);
+      expect(
+        f.calls.filter((call) => call.operation.kind === "inspect"),
+      ).toHaveLength(inspections);
+      const removals = f.calls.filter(
+        (call) => call.operation.kind === "remove",
+      );
+      expect(removals).toHaveLength(2);
+      expect(removals[0].operationId).toBe(removals[1].operationId);
+      const [row] = await db
+        .select()
+        .from(executionWorkspaces)
+        .where(eq(executionWorkspaces.id, workspace!.id));
+      expect(row.metadata).toMatchObject({
+        workspaceProviderRemoved: true,
+        workspaceProviderRemoval: null,
+      });
+    });
+    it("retires cleaned historical bindings when the storage source changes and refuses later reopen", async () => {
+      const f = await fixture();
+      const workspace = await preparePluginWorkspace(db, f.workers, f.input);
+      await db
+        .update(executionWorkspaces)
+        .set({ status: "archived", closedAt: new Date() })
+        .where(eq(executionWorkspaces.id, workspace!.id));
+      await removePluginWorkspace(db, f.workers, workspace!, "a".repeat(40));
+      await expect(
+        projectService(db).updateWorkspace(
+          f.input.projectId,
+          f.input.projectWorkspaceId,
+          { repoUrl: "https://github.com/example/new.git" },
+        ),
+      ).resolves.not.toBeNull();
+      const before = f.calls.length;
+      const result = await executionWorkspaceService(db, {
+        pluginWorkerManager: f.workers,
+      }).reopenClosedIsolatedExecutionWorkspaceForIssue({
+        workspaceId: workspace!.id,
+        issue: {
+          id: f.issueId,
+          companyId: f.companyId,
+          projectId: f.input.projectId,
+        },
+        actor: { actorType: "user", agentId: null },
+        authorizationActor: {
+          type: "board",
+          source: "local_implicit",
+          isInstanceAdmin: true,
+        },
+      });
+      expect(result).toMatchObject({ ok: false, code: "not_reopenable" });
+      expect(f.calls).toHaveLength(before);
+      await expect(
+        projectService(db).update(f.input.projectId, {
+          executionWorkspacePolicy: {},
+        }),
+      ).resolves.not.toBeNull();
+      await expect(
+        projectService(db).removeWorkspace(
+          f.input.projectId,
+          f.input.projectWorkspaceId,
+        ),
+      ).resolves.not.toBeNull();
+    });
+    it("keeps sweeping later workspaces when one storage plugin is unavailable", async () => {
+      const first = await fixture(),
+        second = await fixture();
+      await preparePluginWorkspace(db, first.workers, first.input);
+      await preparePluginWorkspace(db, second.workers, second.input);
+      await db.insert(pluginCompanySettings).values({
+        pluginId: first.pluginId,
+        companyId: first.companyId,
+        enabled: false,
+      });
+      for (const f of [first, second])
+        await db
+          .update(issues)
+          .set({ status: "done", completedAt: new Date() })
+          .where(eq(issues.id, f.issueId));
+      const workers = {
+        getWorker: (id: string) =>
+          [first.pluginId, second.pluginId].includes(id)
+            ? { supportedMethods: ["workspaceOperation"] }
+            : undefined,
+        call: (id: string, ...args: unknown[]) =>
+          (id === first.pluginId ? first.workers : second.workers).call(
+            id,
+            ...(args as [any, any, any]),
+          ),
+      } as unknown as WorkspaceWorkers;
+      await expect(
+        executionWorkspaceService(db, {
+          pluginWorkerManager: workers,
+          workspaceReaperCooldownDays: 0,
+        }).sweepTerminalWorkspaces(100),
+      ).resolves.toBeDefined();
+      expect(
+        second.calls.some((call) => call.operation.kind === "inspect"),
+      ).toBe(true);
+    });
+    it("retries an ambiguous deletion through the existing terminal sweep", async () => {
+      const f = await fixture();
+      const workspace = await preparePluginWorkspace(db, f.workers, f.input);
+      f.loseRemoval();
+      await db
+        .update(executionWorkspaces)
+        .set({ status: "cleanup_failed", closedAt: new Date() })
+        .where(eq(executionWorkspaces.id, workspace!.id));
+      await db
+        .update(issues)
+        .set({ status: "done", completedAt: new Date() })
+        .where(eq(issues.id, f.issueId));
+      await db
+        .update(heartbeatRuns)
+        .set({ status: "cancelled" })
+        .where(eq(heartbeatRuns.id, f.runId));
+      await expect(
+        removePluginWorkspace(db, f.workers, workspace!, "a".repeat(40)),
+      ).rejects.toThrow("incomplete");
+      const workers = {
+        getWorker: (id: string) =>
+          id === f.pluginId
+            ? { supportedMethods: ["workspaceOperation"] }
+            : undefined,
+        call: f.workers.call.bind(f.workers),
+      } as unknown as WorkspaceWorkers;
+      await executionWorkspaceService(db, {
+        pluginWorkerManager: workers,
+        workspaceReaperCooldownDays: 0,
+      }).sweepTerminalWorkspaces(100);
+      const [row] = await db
+        .select()
+        .from(executionWorkspaces)
+        .where(eq(executionWorkspaces.id, workspace!.id));
+      expect(row).toMatchObject({
+        status: "archived",
+        metadata: {
+          workspaceProviderRemoved: true,
+          workspaceProviderRemoval: null,
+        },
+      });
+      expect(
+        f.calls.filter((call) => call.operation.kind === "remove"),
+      ).toHaveLength(2);
+    });
+    it("keeps restoration intent durable when reopening loses the provider response", async () => {
+      const f = await fixture();
+      const workspace = await preparePluginWorkspace(db, f.workers, f.input);
+      await db
+        .update(executionWorkspaces)
+        .set({ status: "archived", closedAt: new Date() })
+        .where(eq(executionWorkspaces.id, workspace!.id));
+      await removePluginWorkspace(db, f.workers, workspace!, "a".repeat(40));
+      f.lose();
+      const request = {
+        workspaceId: workspace!.id,
+        issue: {
+          id: f.issueId,
+          companyId: f.companyId,
+          projectId: f.input.projectId,
+        },
+        actor: { actorType: "user", agentId: null },
+        authorizationActor: {
+          type: "board" as const,
+          source: "local_implicit" as const,
+          isInstanceAdmin: true,
+        },
+      };
+      const svc = executionWorkspaceService(db, {
+        pluginWorkerManager: f.workers,
+      });
+      expect(
+        await svc.reopenClosedIsolatedExecutionWorkspaceForIssue(request),
+      ).toMatchObject({ ok: false, code: "rebuild_failed" });
+      const [pending] = await db
+        .select()
+        .from(executionWorkspaces)
+        .where(eq(executionWorkspaces.id, workspace!.id));
+      expect(pending.metadata).toMatchObject({
+        workspaceProviderRemoved: false,
+        workspaceProviderRestoration: { generation: 1 },
+      });
+      await expect(
+        projectService(db).updateWorkspace(
+          f.input.projectId,
+          f.input.projectWorkspaceId,
+          { repoRef: "new" },
+        ),
+      ).rejects.toThrow("storage owner");
+      expect(
+        await svc.reopenClosedIsolatedExecutionWorkspaceForIssue(request),
+      ).toMatchObject({ ok: true, generation: 1 });
+    });
+    it("rejects unsupported provider modes before making a reservation", async () => {
+      const f = await fixture();
+      await expect(
+        preparePluginWorkspace(db, f.workers, {
+          ...f.input,
+          mode: "shared_workspace",
+          strategy: "project_primary",
+        }),
+      ).rejects.toThrow("does not support");
+      const [task] = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, f.issueId));
+      expect(task.executionWorkspaceId).toBeNull();
+      expect(f.calls).toHaveLength(0);
     });
     it("never removes a checkout with local-only changes", async () => {
       const f = await fixture();

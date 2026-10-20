@@ -1,4 +1,4 @@
-import { inspectPluginWorkspace, removePluginWorkspace } from "../services/plugin-workspaces.js";
+import { removePluginWorkspace } from "../services/plugin-workspaces.js";
 import { canActorReadWorkspaceOperation } from "../services/heartbeat-run-privacy.js";
 import { canActorReadExecutionWorkspace, executionWorkspaceReadSqlCondition } from "../services/authorization.js";
 import { spawn } from "node:child_process";
@@ -1307,8 +1307,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
               workspaceCwd: existing.cwd,
             });
             if (workspace.providerType === "plugin") {
-              const state = await inspectPluginWorkspace(db, opts.pluginWorkerManager, workspace);
-              await removePluginWorkspace(db, opts.pluginWorkerManager, workspace, state.headSha);
+              await removePluginWorkspace(db, opts.pluginWorkerManager, workspace, readiness.git?.headSha ?? null);
               return { cleaned: true, warnings: [] };
             }
             return cleanupExecutionWorkspaceArtifacts({

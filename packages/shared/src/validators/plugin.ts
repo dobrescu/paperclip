@@ -784,7 +784,10 @@ export const pluginManifestV1Schema = z.object({
   ).optional(),
   capabilities: z.array(z.enum(PLUGIN_CAPABILITIES)).min(1),
   agentLifecycle: z.literal(true).optional(),
-  workspaceProvider: z.literal(true).optional(),
+  workspaceProvider: z.object({
+    modes: z.array(z.enum(["shared_workspace", "isolated_workspace", "operator_branch"])).min(1).max(3),
+    strategies: z.array(z.enum(["project_primary", "git_worktree"])).min(1).max(2),
+  }).strict().optional(),
   resourceLifecycle: z.array(z.enum(["agent", "project", "agent_runtime"])).min(1).max(3).optional(),
   aiConnectionRouter: z.object({ name: z.string().trim().min(1).max(100), description: z.string().trim().min(1).max(500) }).strict().optional(),
   entrypoints: z.object({
