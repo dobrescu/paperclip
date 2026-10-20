@@ -778,15 +778,19 @@ captures remain failed evidence; qualifying a fix requires a new live attempt.
 
 Every completed local campaign also writes
 `tests/runner-e2e/results/<campaign>/dashboard.html`. The self-contained page
-shows the complete profile/environment grid with screenshot thumbnails.
+shows every selected execution with screenshot thumbnails, grouped by suite and case.
 The history homepage and campaign report render their campaign summaries as
 selectable HTML text, with suite links, pass counts, status, and timing.
 Campaign reports render only selected executions, including selected cases with
 missing evidence or startup failures. Search and feature/suite/profile filters
-replace the full-catalog sticky index.
-Each suite in the campaign report summary folds open to a list of its selected cases.
-The same case links appear at the start of the suite, with a return to the top
-index. Cases appear once across agent/environment configurations; links prefer
+sit alongside a folding suite/case sidebar scoped to the current campaign.
+Global Overview, Campaign history, and Needs attention pages have no suite tree.
+All results is one continuous report with an overview and all execution previews.
+Suite links jump into the report; sidebar case links open a focused case view
+with a configuration picker. Clickable Campaign / Suite / Case breadcrumbs
+return to the report and preserve its reading position. Suite contents also link
+to execution previews, with a return to the overview and a bottom-right Back to top.
+Cases appear once in the index across agent/environment configurations; links prefer
 a result matching the active filters and clear conflicting filters when needed
 to reveal their destination.
 Case links show a green status dot when all matching configurations passed,

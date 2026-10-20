@@ -324,7 +324,7 @@ describe("runner E2E report aggregation", () => {
     );
     expect(dashboard).not.toContain('class="case case-not-selected"');
     expect(dashboard).toContain("<img");
-    expect(dashboard).toContain('class="brand-lockup"');
+    expect(dashboard).toContain('class="brand-lockup report-brand"');
     expect(dashboard).toContain("data-gallery-dialog");
     expect(dashboard).toContain(
       `id="execution-core-compatibility.${executionId}"`,
@@ -350,8 +350,8 @@ describe("runner E2E report aggregation", () => {
     expect(dashboard).toContain("1,250 in · 75 out");
     expect(dashboard).toContain("$0.0125");
     expect(dashboard).toContain("unpriced or unavailable runs are excluded");
-    expect(dashboard).toContain('class="profile-sticky"');
-    expect(dashboard).toContain('class="mobile-environment-header"');
+    expect(dashboard).toContain('class="execution-preview-label"');
+    expect(dashboard).toContain('aria-label="Campaign suites"');
     expect(dashboard).toContain("data-gallery-profile=");
     expect(dashboard).toContain("data-gallery-environment=");
     expect(dashboard).toContain("data-gallery-duration=");
@@ -366,7 +366,7 @@ describe("runner E2E report aggregation", () => {
     expect(dashboard).toContain("Feature coverage");
     expect(dashboard).not.toContain(".report-filters { position: sticky");
     expect(dashboard).toContain("table-layout: fixed");
-    expect(dashboard).toContain('class="profile-column"');
+    expect(dashboard).toContain('class="execution-previews"');
     expect(dashboard).toContain('aria-label="Previous"');
     expect(dashboard).toContain('aria-label="Next"');
     expect(dashboard).not.toContain("overflow: auto; max-height: calc(100vh");
