@@ -351,9 +351,9 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     branchMode: typeof parseObject(mergedConfig.workspaceStrategy).existingBranch === "string" ? "existing" : "create",
     branchName: typeof parseObject(mergedConfig.workspaceStrategy).existingBranch === "string"
       ? String(parseObject(mergedConfig.workspaceStrategy).existingBranch)
-      : sanitizeBranchName(renderWorkspaceTemplate(String(parseObject(mergedConfig.workspaceStrategy).branchTemplate ?? "{{issue.identifier}}-{{slug}}"), {
+      : resolveEffectiveWorkspaceStrategyType(requestedExecutionWorkspaceMode, mergedConfig) === "git_worktree" ? sanitizeBranchName(renderWorkspaceTemplate(String(parseObject(mergedConfig.workspaceStrategy).branchTemplate ?? "{{issue.identifier}}-{{slug}}"), {
         issue: issueRef, agent, projectId: resolvedWorkspace.projectId, repoRef: resolvedWorkspace.repoRef,
-      })),
+      })) : null,
     baseRef: typeof parseObject(mergedConfig.workspaceStrategy).baseRef === "string"
       ? String(parseObject(mergedConfig.workspaceStrategy).baseRef) : null,
   });

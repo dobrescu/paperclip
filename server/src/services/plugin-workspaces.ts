@@ -179,6 +179,8 @@ export async function preparePluginWorkspace(
   )
     throw conflict("Workspace storage is retired or awaiting cleanup");
   const saved = readWorkspaceProviderBinding(existing?.metadata);
+  const mode = existing?.mode ?? input.mode,
+    strategy = existing?.strategyType ?? input.strategy;
   const projectId = saved?.projectId ?? input.projectId;
   const [project] = projectId
     ? await db
@@ -214,7 +216,7 @@ export async function preparePluginWorkspace(
     !["shared_workspace", "isolated_workspace", "operator_branch"].includes(
       input.mode,
     ) ||
-    !["project_primary", "git_worktree"].includes(input.strategy)
+    !["project_primary", "git_worktree"].includes(strategy)
   )
     throw conflict("Unsupported managed workspace strategy");
   if (existing && existing.providerType !== "plugin")
@@ -229,8 +231,8 @@ export async function preparePluginWorkspace(
   );
   const declaration = selectedProvider.manifestJson.workspaceProvider!;
   if (
-    !declaration.modes.includes(input.mode as "isolated_workspace") ||
-    !declaration.strategies.includes(input.strategy as "git_worktree")
+    !declaration.modes.includes(mode as "isolated_workspace") ||
+    !declaration.strategies.includes(strategy as "git_worktree")
   ) {
     throw conflict(
       "The storage plugin does not support this workspace mode or strategy",
@@ -312,10 +314,10 @@ export async function preparePluginWorkspace(
     repoRef: existing?.baseRef ?? source.repoRef,
     defaultRef: source.defaultRef,
   };
-  const branchName =
-    existing?.branchName ??
-    input.branchName ??
-    (input.strategy === "git_worktree" ? `workspace-${randomUUID()}` : null);
+  const branchName = existing
+    ? existing.branchName
+    : (input.branchName ??
+      (strategy === "git_worktree" ? `workspace-${randomUUID()}` : null));
   // Reserve and bind before calling the provider. A crash must not orphan a created checkout.
   const workspace =
     existing ??

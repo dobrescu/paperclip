@@ -620,6 +620,57 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(task.executionWorkspaceId).toBeNull();
       expect(f.calls).toHaveLength(0);
     });
+    it("checks the saved mode when project defaults change on a reused workspace", async () => {
+      const f = await fixture();
+      const workspace = await preparePluginWorkspace(db, f.workers, f.input);
+      const reused = await preparePluginWorkspace(db, f.workers, {
+        ...f.input,
+        existingWorkspaceId: workspace!.id,
+        mode: "shared_workspace",
+        strategy: "project_primary",
+      });
+      expect(reused!.id).toBe(workspace!.id);
+      expect(f.calls.at(-1).operation).toMatchObject({
+        mode: "isolated_workspace",
+        strategy: "git_worktree",
+      });
+    });
+    it("preserves a saved null branch when reuse defaults change", async () => {
+      const f = await fixture();
+      const [plugin] = await db
+        .select()
+        .from(plugins)
+        .where(eq(plugins.id, f.pluginId));
+      await db
+        .update(plugins)
+        .set({
+          manifestJson: {
+            ...plugin.manifestJson,
+            workspaceProvider: {
+              modes: ["shared_workspace", "isolated_workspace"],
+              strategies: ["project_primary", "git_worktree"],
+            },
+          },
+        })
+        .where(eq(plugins.id, f.pluginId));
+      const workspace = await preparePluginWorkspace(db, f.workers, {
+        ...f.input,
+        mode: "shared_workspace",
+        strategy: "project_primary",
+        branchName: null,
+      });
+      expect(workspace!.branchName).toBeNull();
+      await preparePluginWorkspace(db, f.workers, {
+        ...f.input,
+        existingWorkspaceId: workspace!.id,
+        branchName: "new-default",
+      });
+      expect(f.calls.at(-1).operation).toMatchObject({
+        mode: "shared_workspace",
+        strategy: "project_primary",
+        branchName: null,
+      });
+    });
     it("never removes a checkout with local-only changes", async () => {
       const f = await fixture();
       const workspace = await preparePluginWorkspace(db, f.workers, f.input);
