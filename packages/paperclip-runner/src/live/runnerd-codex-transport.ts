@@ -5168,7 +5168,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           "native_runner_warm_transition_requires_exact_owned_endpoint",
         );
       }
-      const artifact = approvedRunnerArtifact(
+      const artifact = this.options.runnerArtifact ?? approvedRunnerArtifact(
         this.options.runnerBinary ?? defaultCapabilityRunnerdBinary(),
       );
       const proof = inspectWarmRunTransition({

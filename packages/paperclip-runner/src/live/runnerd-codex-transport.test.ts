@@ -6224,6 +6224,12 @@ it.each([
       ]
     : []),
   {
+    lossPoint: "after-result",
+    routed: true,
+    recoveryFault: "none",
+    externalArtifact: true,
+  },
+  {
     lossPoint: "after-confirmation",
     routed: true,
     recoveryFault: "none",
@@ -6242,9 +6248,10 @@ it.each([
     ordinaryFollowup,
   })),
 ])(
-  "recovers a warm attachment with a fresh controller and runner ($lossPoint, routed=$routed, fault=$recoveryFault, followup=$ordinaryFollowup)",
+  "recovers a warm attachment with a fresh controller and runner ($lossPoint, routed=$routed, fault=$recoveryFault, followup=$ordinaryFollowup, external=$externalArtifact)",
   async (testCase) => {
     const { lossPoint, routed, recoveryFault } = testCase;
+    const externalArtifact = "externalArtifact" in testCase && testCase.externalArtifact;
     const ordinaryFollowup =
       "ordinaryFollowup" in testCase && testCase.ordinaryFollowup;
     const snapshotFault =
@@ -6367,7 +6374,9 @@ it.each([
     const launchSpy = vi
       .spyOn(durableControlPlane, "spawnRunner")
       .mockImplementation((options) => {
-        const handle = launch(options);
+        const handle = launch(externalArtifact && recovering
+          ? { ...options, runnerBinaryPath: defaultCapabilityRunnerdBinary() }
+          : options);
         handles.push(handle);
         return handle;
       });
@@ -6817,6 +6826,10 @@ it.each([
       );
       resumed = createCapabilityRunnerdCodexTransport({
         ...options,
+        ...(externalArtifact ? {
+          runnerBinary: "/controller-missing-runner",
+          runnerArtifact: readRunnerdArtifactBinding(options.runnerBinary),
+        } : {}),
         ...(ordinaryFollowup
           ? {
               authorizeWarmTransitionRecovery: async () => {
