@@ -5452,10 +5452,14 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         }
         template.provider = saved.prepared.provider;
       }
+      const preparedContext = this.options.runtimeContext === undefined
+        ? previous?.requirements.runtimeContext ?? null : this.options.runtimeContext;
+      const preparedInstructions = this.options.baseInstructions
+        ?? (previous?.requirements.runtimeContext
+          ? retargetComposedInstructions(previous.requirements.instructions, previous.requirements.runtimeContext, preparedContext)
+          : previous?.requirements.instructions ?? String(record(template.provider).instructions ?? ""));
       environmentPrepared = await this.#prepareOwnedProvider(template, desiredIdentity,
-        this.options.runtimeContext ?? previous?.requirements.runtimeContext ?? null,
-        this.options.baseInstructions ?? previous?.requirements.instructions ?? String(record(template.provider).instructions ?? ""),
-        saved?.prepared, saved?.requirements);
+        preparedContext, preparedInstructions, saved?.prepared, saved?.requirements);
       this.#runAttachTemplate = structuredClone(template);
     }
     if (rotatedAuthority) {

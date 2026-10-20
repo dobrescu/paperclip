@@ -39,7 +39,9 @@ provider descriptor once. They do not contain these recovery records.
 
 Recovery within the same run must return the same configuration. This rule also
 applies during an interrupted warm attachment. A new run uses its current
-requirements. Provider session compatibility checks remain in their existing
+requirements. For a new run, `runtimeContext: null` removes the assigned context.
+Only an omitted context can reuse the previous context.
+Provider session compatibility checks remain in their existing
 backends. Close waits for preparation within its deadline. A timeout retains an
 unsettled checkpoint and prevents reuse.
 
