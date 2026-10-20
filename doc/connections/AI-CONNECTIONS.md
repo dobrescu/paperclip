@@ -563,6 +563,24 @@ requires a fresh session. The metadata is removed before passing session params
 to an adapter. Temporary authentication-home paths do not change the configuration
 fingerprint. These checks do not relax current connection authorization.
 
+Managed Claude (`claude_local`) on a local target keeps its conversation
+transcripts outside the temporary home, in
+`companies/<company>/agents/<agent>/claude-transcripts/`. Each task and session
+identity (grant, responsible user, credential, and credential epoch) gets its own
+directory, so a replaced credential does not see the earlier conversations.
+Runs without a task, such as unscoped timer wakes, always start fresh and keep
+nothing.
+Credentials stay in the temporary home and cleanup still deletes them. The ACP
+engine ignores the temporary-home paths in its session fingerprint only when the
+transcripts are kept. Remote targets and other harnesses keep the earlier behavior
+and start a fresh provider session on each run.
+
+Workspace filesystem confinement mounts only the run's own transcript directory.
+An unconfined local run executes as the server's OS user and can read other
+transcript directories, the same as any other server-owned file. Like the
+agent's `codex-home`, transcripts are not deleted when the agent is removed or a
+credential is revoked.
+
 Quota polling has a 20-second response deadline. Once a managed OAuth refresh
 starts, it has its own 60-second request lifetime so the replacement token body
 can still be read and committed after the dashboard stops waiting. A successful

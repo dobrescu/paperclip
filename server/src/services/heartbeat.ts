@@ -285,6 +285,7 @@ import {
 import {
   prepareManagedAiRuntime,
   assertManagedAiProjectAuth,
+  retainManagedClaudeTranscripts,
 } from "./ai-connection-runtime.js";
 import { aiConnectionBindingSchema, aiRuntimeConnectionBindingSchema, type AiConnectionRouterSelection } from "@paperclipai/shared";
 import { aiConnectionRouterService, AiConnectionPoolExhausted, applyAiConnectionRouterTaskSettings } from "./ai-connection-router.js";
@@ -2923,6 +2924,12 @@ export function heartbeatService(
       } else {
         delete context.paperclipScratch;
       }
+      const managedAiRetainedHome = await retainManagedClaudeTranscripts({
+        runtime: managedAiRuntime, adapterType: agent.adapterType, companyId: agent.companyId, agentId: agent.id,
+        taskKey: deriveTaskKey(context, null), target: executionTarget,
+      });
+      if (managedAiRetainedHome) context.managedAiRetainedHome = managedAiRetainedHome;
+      else delete context.managedAiRetainedHome;
       if (issueId && (!executionTarget || executionTarget.kind === "local")) {
         await recordLegacyCaseHandoffCleanupIntent(db, { runId: run.id, issueId, controllerBootId: legacyControllerBootId, scratch: runScratch });
       }

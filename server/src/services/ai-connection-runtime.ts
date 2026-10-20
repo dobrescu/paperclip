@@ -4,9 +4,11 @@ import type { PluginTaskCredentialWritebackBinding } from "./plugin-task-credent
 import { OPENROUTER_ATTRIBUTION_HEADERS, openRouterClaudeHeaders } from "@paperclipai/shared/openrouter-attribution";
 import { createHash } from "node:crypto";
 import { HttpError, unprocessable } from "../errors.js";
-import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, realpath, symlink, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { resolveManagedClaudeTranscriptsDir } from "../home-paths.js";
+import { logger } from "../middleware/logger.js";
 import { and, eq } from "drizzle-orm";
 import { type Db, companySecrets, connectionGrants } from "@paperclipai/db";
 import {
@@ -223,6 +225,27 @@ async function reconcileManagedCredentialCleanup(scope: RetainedAiCleanupScope):
   const ownership = managedProbeCredentialLocks.getStore();
   if (ownership?.active && ownership.companyId === scope.companyId) assertAiCredentialCleanupSettled(scope);
   else await reconcileRetainedAiCleanup(scope);
+}
+
+export async function retainManagedClaudeTranscripts(input: {
+  runtime: { home: string; sessionIdentity: string } | undefined;
+  adapterType: string;
+  companyId: string;
+  agentId: string;
+  taskKey: string | null;
+  target: AdapterExecutionTarget | null | undefined;
+}): Promise<string | undefined> {
+  const { runtime, taskKey } = input;
+  if (!runtime || !taskKey || input.adapterType !== "claude_local" || (input.target && input.target.kind !== "local")) return undefined;
+  try {
+    const transcriptsDir = resolveManagedClaudeTranscriptsDir(input.companyId, input.agentId, runtime.sessionIdentity, taskKey);
+    await mkdir(transcriptsDir, { recursive: true, mode: 0o700 });
+    await symlink(await realpath(transcriptsDir), path.join(runtime.home, "provider", "projects"));
+    return runtime.home;
+  } catch (err) {
+    logger.warn({ err, agentId: input.agentId }, "Could not retain Claude transcripts; this run will not be resumable");
+    return undefined;
+  }
 }
 
 export async function prepareManagedAiRuntime(

@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -120,6 +123,35 @@ describe("claude_local ACP startup fallback", () => {
         }),
       }),
     );
+  });
+
+  it("mounts the durable transcript directory a managed connection links into the Claude config dir", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "claude-confined-transcripts-"));
+    try {
+      const providerHome = path.join(root, "home", "provider");
+      const durableTranscripts = path.join(root, "companies", "company-1", "agents", "agent-1", "claude-transcripts", "scope");
+      await fs.mkdir(providerHome, { recursive: true });
+      await fs.mkdir(durableTranscripts, { recursive: true });
+      await fs.symlink(durableTranscripts, path.join(providerHome, "projects"));
+      const managedConfig = {
+        engine: "cli",
+        managedAiConnection: { provider: "anthropic", method: "subscription" },
+        env: { CLAUDE_CONFIG_DIR: providerHome },
+      };
+      const transcriptMount = { path: await fs.realpath(durableTranscripts), access: "rw" };
+      const sandboxPaths = () => runAdapterExecutionTargetProcess.mock.calls
+        .map((call) => (call as unknown[])[4] as { localProcessSandbox?: { managedPaths: unknown[] } })
+        .find((options) => options?.localProcessSandbox)?.localProcessSandbox?.managedPaths;
+
+      await execute(buildContext({ ...managedConfig, filesystemScope: "workspace" }) as never);
+      expect(sandboxPaths()).toContainEqual(transcriptMount);
+
+      vi.clearAllMocks();
+      await execute(buildContext({ ...managedConfig, networkScope: "allowlist" }) as never);
+      expect(sandboxPaths()).not.toContainEqual(transcriptMount);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("keeps explicit ACP strict when startup fails", async () => {
