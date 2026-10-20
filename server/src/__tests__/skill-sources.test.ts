@@ -1,3 +1,4 @@
+import { resolveExternalTestDatabaseUrl } from './helpers/external-test-database.js';
 import { applyPendingMigrations } from '@paperclipai/db';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -16,7 +17,7 @@ import { companySkillService } from '../services/company-skills.js';
 import { skillFileBytes } from '../services/skill-snapshot.js';
 import { deleteCompany } from '../services/company-deletion.js';
 
-const externalUrl = process.env.PAPERCLIP_SKILL_SOURCES_TEST_DATABASE_URL;
+const externalUrl = resolveExternalTestDatabaseUrl('PAPERCLIP_SKILL_SOURCES_TEST_DATABASE_URL');
 const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTestSupport();
 describe.skipIf(!support.supported)('skill source persistence', () => {
   let testDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;

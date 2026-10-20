@@ -3120,7 +3120,7 @@ imports or eligible automatic refreshes. Removing the five-second discovery poll
 establishes worker quiet; it does not establish host or database suspension.
 
 The targeted suites also accept external PostgreSQL when embedded PostgreSQL is
-unavailable. Use a separate, disposable database for each variable:
+unavailable. Use a separate, disposable database whose name ends in `_test` for each variable:
 `PAPERCLIP_SKILL_SYNC_TEST_DATABASE_URL`,
 `PAPERCLIP_PROJECT_SKILLS_TEST_DATABASE_URL`, and
 `PAPERCLIP_SKILL_SOURCES_TEST_DATABASE_URL`. The suites apply migrations and create

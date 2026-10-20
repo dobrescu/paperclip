@@ -1,3 +1,4 @@
+import { resolveExternalTestDatabaseUrl } from '../__tests__/helpers/external-test-database.js';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -15,7 +16,7 @@ import { idleWorkSnapshot } from './task-admission.js';
 import { readIdleSleepSafety } from './idle-sleep-safety.js';
 import { companyService } from './companies.js';
 
-const externalUrl = process.env.PAPERCLIP_SKILL_SYNC_TEST_DATABASE_URL;
+const externalUrl = resolveExternalTestDatabaseUrl('PAPERCLIP_SKILL_SYNC_TEST_DATABASE_URL');
 const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTestSupport();
 const setup = { refreshUserId: null, refreshAgentId: null, refreshLocalTrusted: true, connectionId: null, refreshGrantId: null };
 

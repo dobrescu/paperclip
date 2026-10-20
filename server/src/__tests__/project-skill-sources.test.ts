@@ -1,3 +1,4 @@
+import { resolveExternalTestDatabaseUrl } from './helpers/external-test-database.js';
 import { applyPendingMigrations } from '@paperclipai/db';
 import { reserveInitialSkillWork } from '../services/skill-source-import-budget.js';
 import { admitDeferredSkillImports, lockSkillImportQueue, MAX_COMPANY_PENDING_SKILL_IMPORTS, MAX_PROJECT_PENDING_SKILL_IMPORTS, SKILL_IMPORT_CAPACITY_WAIT } from '../services/skill-source-import-queue.js';
@@ -20,7 +21,7 @@ import { skillAccessService, withSkillActor } from '../services/skill-access.js'
 import type { AuthorizationActor } from '../services/authorization.js';
 import { forbidden, unprocessable } from '../errors.js';
 
-const externalUrl = process.env.PAPERCLIP_PROJECT_SKILLS_TEST_DATABASE_URL;
+const externalUrl = resolveExternalTestDatabaseUrl('PAPERCLIP_PROJECT_SKILLS_TEST_DATABASE_URL');
 const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTestSupport();
 describe.skipIf(!support.supported)('automatic project skill sources', () => {
   let testDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
