@@ -109,6 +109,10 @@ export async function assertManagedAiProjectAuth(
         : [];
   const pattern =
     "apiKeyHelper|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|model_provider[[:space:]]*=|env_key[[:space:]]*=|experimental_bearer_token|cli_auth_credentials_store";
+  if (target?.kind === "remote" && target.transport === "sandbox" && target.runnerTask && files.length) {
+    // The Runner checks project overrides against its installed account before provider startup.
+    return;
+  }
   if (target?.kind === "remote" && files.length) {
     // Only inspect for conflicting keys; never return configuration or credential values.
     const result = await runAdapterExecutionTargetProcess(

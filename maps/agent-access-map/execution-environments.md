@@ -155,6 +155,17 @@ remaining operations before qualifying the whole capability.
 Gaps: Choosing among permitted targets differs from creating/configuring host targets;
 test authorized and denied selection.
 
+Scoped plugin execution update: `paperclip_runner` supports a saved plugin
+environment through the server-selected lease and the SDK `environmentTask` RPC.
+This is an execution path, not a new agent-callable management endpoint. Host
+company/project checks and native PRP authorization remain required; declaring a
+plugin capability does not authorize the agent to change its environment.
+The [integration fixture](../../server/src/__tests__/plugin-runner-task.integration.test.ts)
+exercises the host and SDK with synthetic tasks and a mocked WebSocket.
+The task API does not transfer files or reveal guest filesystem paths.
+This source update does not qualify live agent access, warm retention, or a provider.
+See the [execution contract](../../doc/plugins/PLUGIN_RUNNER_EXECUTION.md).
+
 ## `images`
 
 Review: `baseline`.
@@ -177,3 +188,11 @@ own policy and access review.
 
 Gaps: No default agent custom-image administration/terminal path; this is a policy
 decision before adding a tool.
+
+The task-only setup path uses a Core-issued expiring probe identity and a real,
+read-only Runner hello. Runner checks project authentication before provider startup.
+[Setup probe coverage](../../server/src/services/native-runtime/plugin-runner-probe.test.ts)
+uses the real Runner and a synthetic Codex provider through loopback PRP; TLS
+termination is replaced by the fixture. It does not qualify a live plugin provider.
+
+The plugin installs task resources. Runner resolves its local paths. Core supplies task identity and PRP launch limits.

@@ -23,6 +23,7 @@ import { nativeRuntimeContextFixture } from "../native-runtime/runtime-context.t
 import * as managedRepositoryCheckout from "../managed-repository-checkout.js";
 import { isolatedRemoteSourcePath } from "../isolated-remote-workspace-source.js";
 import { cleanupExecutionWorkspaceArtifacts } from "../workspace-runtime.js";
+import { buildProjectMentionHref } from "@paperclipai/shared";
 import { trace } from "@opentelemetry/api";
 import { buildExecutionWorkspaceAdapterConfig } from "../execution-workspace-policy.js";
 import { createLocalDiskStorageProvider } from "../../storage/local-disk-provider.js";
@@ -277,7 +278,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     expect((await readIssue(issue.id)).executionWorkspaceId).toBeNull();
   });
 
-  it.each(["sandbox", "ssh", "local", null] as const)("uses the selected %s placement for controller provisioning", async driver => {
+  it.each(["sandbox", "ssh", "plugin", "local", null] as const)("uses the selected %s placement for controller provisioning", async driver => {
     const { input, source, issue, envOrchestrator } = await fixture(true);
     const marker = join(source, "host-provision-ran");
     const provisionCommand = `printf host > '${marker}'`;
@@ -290,9 +291,37 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     const bound = await readIssue(issue.id);
     const [workspace] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, bound.executionWorkspaceId!));
     expect(await readFile(join(workspace.cwd!, "README.md"), "utf8")).toBe("source content\n");
-    if (driver === "sandbox" || driver === "ssh") await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    if (driver === "sandbox" || driver === "ssh" || driver === "plugin") await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     else expect(await readFile(marker, "utf8")).toBe("host");
     expect(input.config.mergedConfig).toEqual(originalConfig);
+  });
+
+  it.each([true, false])("forwards only authorized plugin project IDs without staging (remote enabled: %s)", async enabled => {
+    const { input, issue, envOrchestrator } = await fixture();
+    vi.stubEnv("PAPERCLIP_MULTI_PROJECT_WORKSPACE_SYNC", "true");
+    vi.stubEnv("PAPERCLIP_MULTI_PROJECT_WORKSPACE_SYNC_REMOTE", String(enabled));
+    input.agent = { ...input.agent, adapterType: "paperclip_runner" };
+    input.environment.selectedEnvironmentForConfig = { ...input.environment.localEnvironment, driver: "plugin" };
+    const [readable, privateProject] = await db.insert(projects).values([
+      { companyId: issue.companyId, name: "Readable reference" },
+      { companyId: issue.companyId, name: "Private reference", visibility: "private" },
+    ]).returning();
+    const unavailableCwd = join(home, readable.id, "must-not-stage");
+    await db.insert(projectWorkspaces).values({ companyId: issue.companyId, projectId: readable.id, name: "Provider-only storage", cwd: unavailableCwd });
+    await db.update(issues).set({ description: [readable, privateProject].map(project => `[project](${buildProjectMentionHref(project.id)})`).join(" ") }).where(eq(issues.id, issue.id));
+    const stopped = new Error("Fixture reached plugin realization");
+    const realize = vi.spyOn(envOrchestrator, "realizeForRun").mockRejectedValue(stopped);
+    try {
+      await expect(prepareHeartbeatWorkspace(db, input)).rejects.toBe(stopped);
+      expect(realize).toHaveBeenCalledWith(expect.objectContaining({
+        runnerTaskProjectIds: enabled ? [issue.projectId, readable.id] : undefined,
+        executionWorkspace: expect.objectContaining({ additionalWorkspaces: [] }),
+      }));
+      await expect(access(unavailableCwd)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      vi.stubEnv("PAPERCLIP_MULTI_PROJECT_WORKSPACE_SYNC", "true");
+      vi.stubEnv("PAPERCLIP_MULTI_PROJECT_WORKSPACE_SYNC_REMOTE", "true");
+    }
   });
 
   it("checks current repository admission before publishing configured sibling repositories", async () => {
@@ -439,6 +468,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
   it.each([
     { transport: "local", descriptor: "absent" },
     { transport: "ssh", descriptor: "absent" },
+    { transport: "task", descriptor: "absent" },
     { transport: "daytona", descriptor: "valid" },
     { transport: "daytona", descriptor: "absent" },
     { transport: "daytona", descriptor: "corrupt" },
@@ -457,7 +487,8 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
       : transport === "ssh" ? { kind: "remote", transport: "ssh", remoteCwd,
         spec: { host: "fixture.invalid", port: 22, username: "fixture", remoteWorkspacePath: remoteCwd,
           privateKey: null, knownHosts: null, strictHostKeyChecking: true, remoteCwd } }
-      : { kind: "remote", transport: "sandbox", providerKey: "daytona", remoteCwd };
+      : { kind: "remote", transport: "sandbox", providerKey: "daytona", remoteCwd,
+          ...(transport === "task" ? { runnerTask: vi.fn() } : {}) };
     const realize = input.services.envOrchestrator.realizeForRun;
     vi.spyOn(input.services.envOrchestrator, "realizeForRun").mockImplementation(async args => ({
       ...await realize(args), executionTarget: target,
@@ -482,7 +513,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     if (transport !== "daytona" || descriptor === "valid") {
       const result = await prepareHeartbeatWorkspace(db, input);
       expect(result.executionTarget).toEqual(target);
-      if (transport === "ssh") expect(reserve).not.toHaveBeenCalled();
+      if (transport === "ssh" || transport === "task") expect(reserve).not.toHaveBeenCalled();
       else expect(reserve).toHaveBeenCalledWith({ companyId: issue.companyId, issueId: issue.id,
         workspaceId: first.persistedExecutionWorkspace!.id, cwd: admittedRoot, agentId: input.agent.id, runId: input.run.id });
       if (transport !== "daytona") {

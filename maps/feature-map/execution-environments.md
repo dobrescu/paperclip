@@ -78,6 +78,17 @@ execution. Remote-driver probes and a real bounded run need their own evidence.
 
 ### `remote-execution`
 
+For `paperclip_runner`, a saved plugin environment can provide per-turn Runner
+execution when its manifest and worker expose the Runner task API. The task
+contract starts a provider-owned Runner without shell or workspace hooks. Core
+resolves the saved lease, connects through PRP, and verifies stop before lease
+cleanup. The provider owns the installed agent home and retained session files;
+data transfer is outside task execution. See the
+[plugin contract](../../doc/plugins/PLUGIN_RUNNER_EXECUTION.md).
+The [fake-provider integration](../../server/src/__tests__/plugin-runner-task.integration.test.ts)
+checks acquisition, SDK dispatch, scope denial, stop proof and deletion recovery.
+Its WebSocket is mocked; it does not qualify a live provider or a real Runner handshake.
+
 Automated: [execution target](../../server/src/__tests__/environment-execution-target.test.ts) and [custom images](../../server/src/__tests__/environment-custom-images-service.test.ts) cover contracts; [SSH live test](../../server/src/__tests__/environment-live-ssh.test.ts) requires its own external setup.
 
 The [environment runtime regression](../../server/src/__tests__/environment-runtime.test.ts)
@@ -95,6 +106,14 @@ Manual: Run a bounded command in the intended target, inspect its output and wor
   harness; the selected native runtime still needs its own setup and useful-task proof.
 - The local option may appear only when editing an existing local environment; availability follows current UI/provider capabilities.
 - Workspace service reachability and environment reachability are separate checks.
+
+The task-only setup path uses a Core-issued expiring probe identity and a real,
+read-only Runner hello. Runner checks project authentication before provider startup.
+[Setup probe coverage](../../server/src/services/native-runtime/plugin-runner-probe.test.ts)
+uses the real Runner and a synthetic Codex provider through loopback PRP; TLS
+termination is replaced by the fixture. It does not qualify a live plugin provider.
+
+The plugin installs task resources. Runner resolves its local paths. Core supplies task identity and PRP launch limits.
 
 ### Storybook verification
 

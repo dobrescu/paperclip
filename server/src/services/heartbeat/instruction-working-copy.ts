@@ -79,6 +79,8 @@ export function createHeartbeatInstructionWorkingCopy(input: InstructionWorkingC
   let nativeInstructionReservation: Awaited<ReturnType<typeof reserveWarmNativeInstructionDirectory>> = null;
   let instructionCopy: Awaited<ReturnType<typeof instructionCopies.prepare>> = null;
   let instructionSave: Record<string, unknown> | null = null;
+  const task = executionTarget?.kind === "remote" && executionTarget.transport === "sandbox" ? executionTarget.runnerTask : undefined;
+  const instructionTarget = executionTarget;
   const instructionPreparationKey = createHash("sha256").update(JSON.stringify({
     adapterType: agent.adapterType, adapterConfig: agent.adapterConfig, runtimeConfig: agent.runtimeConfig, sessionConfigMetadata,
     duplexBridge: adapterExecutionTargetEnablesSandboxDuplexBridge(executionTarget),
@@ -104,7 +106,7 @@ export function createHeartbeatInstructionWorkingCopy(input: InstructionWorkingC
   const collectStoppedInstructions = async () => {
     if (!instructionCopy) return;
     const saved = await collectStoppedInstructionCopyWithRetries(() => instructionCopies.collectStopped({
-      companyId: agent.companyId, runId: readRun().id, target: executionTarget,
+      companyId: agent.companyId, runId: readRun().id, target: instructionTarget,
     }));
     if (!saved) return;
     if (saved.state !== "superseded") await recordInstructionSave(saved);
@@ -113,11 +115,11 @@ export function createHeartbeatInstructionWorkingCopy(input: InstructionWorkingC
     ...(isAgentDirectoryCopy(instructionCopy) ? { runId: readRun().id, preparationKey: instructionPreparationKey } : {}),
     root: instructionCopy.executionRoot,
     ...(instructionCopy.receipt?.warm === true ? { checkpointWarm: async () => {
-      const saved = await instructionCopies.checkpointWarm({ companyId: agent.companyId, runId: readRun().id, target: executionTarget });
+      const saved = await instructionCopies.checkpointWarm({ companyId: agent.companyId, runId: readRun().id, target: instructionTarget });
       if (saved) await recordInstructionSave(saved);
       return saved?.state === "warm_saved" && saved.errorCode === null;
     } } : {}),
-    hasChanges: () => instructionCopies.hasChanges({ companyId: agent.companyId, runId: readRun().id, target: executionTarget }),
+    hasChanges: async () => { return instructionCopies.hasChanges({ companyId: agent.companyId, runId: readRun().id, target: instructionTarget }); },
     collectStopped: collectStoppedInstructions,
     retirementFailed: async () => { await instructionCopies.reportRetirementUnconfirmed(agent.companyId, readRun().id); },
   } : undefined;
@@ -127,7 +129,7 @@ export function createHeartbeatInstructionWorkingCopy(input: InstructionWorkingC
     nativeRuntimeResolution: Selection["nativeRuntimeResolution"];
     hasInstructionFilesystem: boolean;
   }) {
-    if (hasInstructionFilesystem) {
+    if (hasInstructionFilesystem && !task) {
       try {
         // Missing contract fields on a restored session mean the deployed
         // legacy format. New sessions opt into whole-directory persistence.
@@ -145,7 +147,7 @@ export function createHeartbeatInstructionWorkingCopy(input: InstructionWorkingC
             : parseObject(agent.adapterConfig).lifecycleMode === "warm");
         if (warmFiles && taskSessionForRun?.lastRunId) {
           nativeInstructionReservation = await reserveWarmNativeInstructionDirectory({ companyId: agent.companyId, agentId: agent.id,
-            previousRunId: taskSessionForRun.lastRunId, runId: readRun().id, target: executionTarget,
+            previousRunId: taskSessionForRun.lastRunId, runId: readRun().id, target: instructionTarget,
             observabilityCompatibilityKey: input.observabilityCompatibilityKey,
             canReuse: () => instructionCopies.canReuseWarm(agent.companyId, agent.id, taskSessionForRun!.lastRunId!),
           });
@@ -158,7 +160,7 @@ export function createHeartbeatInstructionWorkingCopy(input: InstructionWorkingC
             environmentId: executionTarget?.environmentId ?? null, runId: readRun().id, preparationKey: instructionPreparationKey, forceRetirement: !taskSessionForRun,
             adopt: async previousRunId => {
               instructionCopy = await instructionCopies.adopt({ companyId: agent.companyId, agentId: agent.id,
-                runId: readRun().id, previousRunId, target: executionTarget, cwd: executionWorkspace.cwd, allowRetirementHandoff: true });
+                runId: readRun().id, previousRunId, target: instructionTarget, cwd: executionWorkspace.cwd, allowRetirementHandoff: true });
               return nativeInstructionWorkingCopy() ?? null;
             },
           });
@@ -168,7 +170,7 @@ export function createHeartbeatInstructionWorkingCopy(input: InstructionWorkingC
         }
         const prepareInstructions = (reuseRunId?: string) => instructionCopies.prepare({
           companyId: agent.companyId, agentId: agent.id, runId: readRun().id,
-          target: executionTarget, cwd: executionWorkspace.cwd,
+          target: instructionTarget, cwd: executionWorkspace.cwd,
           legacy: Object.keys(priorFileInput).length > 0 && priorWorkingCopy.kind !== "agent_files",
           warm: warmFiles, reuseRunId,
           onWarmHandoff: copy => {
