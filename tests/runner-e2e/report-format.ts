@@ -30,4 +30,3 @@ export function usdLabel(value: number | null) {
   if (value === null) return "Unknown";
   return `$${value.toFixed(value < 0.01 ? 6 : 4)}`;
 }
-
