@@ -2459,7 +2459,7 @@ it.each(["installed", "explicit"] as const)("records the selected %s Codex comma
   }
 });
 
-it.each(["reuse", "large-instructions", "close-attachment", "timeout-attachment"] as const)("runs an environment-prepared descriptor without Core filesystem preparation (%s)", async mode => {
+it.each(["reuse", "large-instructions", "rotated-recovery", "close-attachment", "timeout-attachment"] as const)("runs an environment-prepared descriptor without Core filesystem preparation (%s)", async mode => {
   const root = await mkdtemp(join(tmpdir(), "runner-environment-launch-"));
   const binary = defaultCapabilityRunnerdBinary();
   const artifact = { version: "0.3.0", digest: `sha256:${createHash("sha256").update(await readFile(binary)).digest("hex")}` };
@@ -2482,10 +2482,20 @@ it.each(["reuse", "large-instructions", "close-attachment", "timeout-attachment"
   const checkpoint = vi.fn();
   const releaseRoute = vi.fn();
   let currentRun = () => "";
-  const create = (closeGraceMs = 5_000) => createCapabilityRunnerdCodexTransport({ provider: "codex", runnerArtifact: artifact,
+  const create = (closeGraceMs = 5_000, runId = "run-prepared") => createCapabilityRunnerdCodexTransport({ provider: "codex", runnerArtifact: artifact,
     closeGraceMs,
     stateDirectory: root, runtimeContext: context,
-    prpIdentity: { runnerInstanceId: "runner-prepared", environmentLeaseId: "lease-prepared", runId: "run-prepared",
+    ...(mode === "rotated-recovery" ? {
+      readRunnerState: async () => JSON.parse(await readFile(join(root, "runner/runner-state.json"), "utf8")),
+      prepareExternalRunnerState: async () => undefined,
+      archiveExternalRunnerState: async () => {
+        const path = join(root, "runner/runner-state.json");
+        const prior = JSON.parse(await readFile(path, "utf8"));
+        await rename(path, join(root, "prior-runner-state.json"));
+        return prior;
+      },
+    } : {}),
+    prpIdentity: { runnerInstanceId: "runner-prepared", environmentLeaseId: "lease-prepared", runId,
       normalizedSessionId: "session-prepared", turnId: "turn-prepared", itemId: "item-prepared" },
     prepareLaunch: async (requirements, recovery) => {
       requestedRun = requirements.identity.runId;
@@ -2538,6 +2548,18 @@ it.each(["reuse", "large-instructions", "close-attachment", "timeout-attachment"
     await expect(stat(join(root, "codex-home"))).rejects.toHaveProperty("code", "ENOENT");
     await expect(stat(join(root, "runtime-context.json"))).rejects.toHaveProperty("code", "ENOENT");
     await transport.close();
+    if (mode === "rotated-recovery") {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const rotated = create(5_000, "run-prepared-rotated");
+        try {
+          await rotated.transport.request("thread/read", { threadId: (opened.thread as { id: string }).id });
+          expect(requestedRun).toBe("run-prepared-rotated");
+          expect(requestedInstructions).toBe(coreInstructions);
+          expect(recovered).toBe(attempt > 0);
+        } finally { await rotated.transport.close(); }
+      }
+      return;
+    }
     const resumed = create(mode === "timeout-attachment" ? 500 : 5_000);
     try {
       await resumed.transport.request("thread/read", { threadId: (opened.thread as { id: string }).id });
