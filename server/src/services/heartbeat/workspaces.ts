@@ -3486,9 +3486,9 @@ export function createHeartbeatWorkspaceResolver(db: Db) {
       if (preferredProjectWorkspaceId && !preferredWorkspace) {
         preferredWorkspaceWarning = `Selected project workspace "${preferredProjectWorkspaceId}" is not available on this project.`;
       }
+      const [sourceProject] = projectWorkspaceRows.length ? await db.select({ policy: projects.executionWorkspacePolicy }).from(projects)
+        .where(and(eq(projects.id, workspaceProjectId!), eq(projects.companyId, agent.companyId))) : [];
       for (const workspace of projectWorkspaceRows) {
-        const [sourceProject] = await db.select({ policy: projects.executionWorkspacePolicy }).from(projects)
-          .where(and(eq(projects.id, workspace.projectId), eq(projects.companyId, agent.companyId)));
         if (sourceProject?.policy?.storageProviderPluginId) {
           return { cwd: `/workspaces/${workspace.id}`, source: "project_primary" as const,
             projectId: workspace.projectId, workspaceId: workspace.id, repoUrl: workspace.repoUrl,
