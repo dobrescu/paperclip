@@ -178,6 +178,11 @@ describe documentation scope, not runtime health.
 
 The map documents user journeys. It does not execute them automatically;
 generated inventories record documentation scope rather than live test health.
+Product E2E reports reuse these capability IDs through the
+[journey associations](../../tests/runner-e2e/journey-features.ts). Their coverage
+view shows which scenarios in a campaign are linked to each capability and the
+associated test results. An association or passing scenario does not certify
+the whole capability; unselected and unmapped journeys remain distinct.
 
 When maintaining a recipe, compare its entry points and expected results with
 the current source. Check that linked tests still exercise the stated behavior

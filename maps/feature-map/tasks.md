@@ -46,6 +46,19 @@ disposable project. Persistence checks can assign work to Me or leave it
 unassigned; execution checks additionally need an invokable test agent. Record
 whether a real or simulated harness handles execution.
 
+**Operation checkpoints**
+
+Use these checks alongside the entry-point recipes below and the operation records in the [access companion](../agent-access-map/tasks.md). Record the actual actor, surface, saved result and denial separately. Source review and linked tests do not establish a live pass.
+
+| Capability ID | Action and persisted result | Denial, race and retry checks |
+| --- | --- | --- |
+| `tasks/create` | Create an unassigned task or assign it to Me; save its description and context, then reopen and reload the exact task. | Exercise required fields, inaccessible parents/projects, and the same API creation key with identical and changed input. Compare task IDs and run counts; saving a draft is not creation. |
+| `tasks/organize` | Find the saved task through list, project, filter, and direct-link surfaces; change supported labels separately. | Compare another actor’s private results and another company. Distinguish browser sorting/grouping preferences from saved task data. |
+| `tasks/properties` | Change title, metadata, assignee, dependencies, work mode, execution settings, and monitor/watchdog configuration as separate operations. Reload each saved change. | Use an occupied checkout, stale status version, invalid dependency, stopped run, and disallowed mode. Check the specific rejection and unchanged fields; a successful title edit does not establish assignment authority. |
+| `tasks/discussion` | Post a unique comment, reload, and inspect attribution. Read history, inspect a queued message, and delete only an owned disposable comment where allowed. | Separate an ordinary comment from steering or a wake. Check inaccessible task history, author-only deletion, queued cancellation, and duplicate delivery. Feedback votes have their own human authority. |
+| `tasks/completion` | Complete, block, request review, reopen, and cancel separate disposable tasks through offered controls. Inspect the saved outcome, review gates, and execution state. | Test pending dependencies/reviews, a stale or active checkout, and late writes after handoff. Terminal status does not prove provider stop or saved files. Verify checkout/release and destructive deletion separately from completion. |
+| `tasks/privacy` | Create private work with a responsible person; share a child, inspect direct/inherited rows, revoke a direct grant, and check publication constraints. | Use separate ordinary people and an actual agent. Shared readers cannot manage grants; ancestor/project access changes at its source. Reload and retry discovery/direct reads after revocation; keep unrelated direct grants. |
+
 ### `new-task`
 
 Automated: [creation dialog](../../ui/src/components/NewIssueDialog.test.tsx) is component coverage with mocked requests.
@@ -67,6 +80,22 @@ Manual: Filter by status and assignee, change grouping/sort, open a task, and re
 ### `task-detail`
 
 Automated: [task detail](../../ui/src/pages/IssueDetail.test.tsx) covers component behavior, while [issue service](../../server/src/__tests__/issues-service.test.ts) covers server contracts.
+
+Failure markers have no dashed divider rules. An adjacent run error and
+no-live-execution-path notice show only the last error, with its details and
+retry action, including a permitted legacy run retry carried onto a later
+recovery notice. Intervening messages, unrelated system notices that quote error
+text, and credential-access denials stay visible. Explicit non-recovery titles
+stop grouping. Saved stranded-recovery action metadata plus a known recovery
+statement also identify recovery notices with a default or source-run title.
+Only known recovery statements use the legacy text fallback.
+[Grouping tests](../../ui/src/components/task-chat/adjacent-errors.test.ts) and
+[marker tests](../../ui/src/components/task-chat/TaskChatMarker.test.tsx) cover
+the presentation. The [Failure notices stories](../../ui/storybook/stories/tasks/failure-notices.stories.tsx)
+mount the production thread view with fixture data. The focused
+[browser suite](../../tests/storybook-visual/failure-notices.spec.ts) checks
+play assertions, disclosure, retry callbacks, themes and phone width. These
+checks do not dispatch a real retry or change stored run history.
 
 Automated: [paused assignee relevance](../../tests/e2e/completed-task-paused-assignee.spec.ts)
 uses a real disposable server and paused process agent, with no inference, to

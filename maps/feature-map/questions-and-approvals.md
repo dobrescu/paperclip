@@ -84,6 +84,21 @@ Use separate disposable requests for accept, decline, and revision paths. Record
 the actor and request revision. Prepare a waiting question through a test agent;
 a component fixture alone cannot prove live response delivery.
 
+**Operation checkpoints**
+
+Use these checks alongside the entry-point recipes below and the operation records in the [access companion](../agent-access-map/questions-and-approvals.md). Record the actual actor, surface, saved result and denial separately. Source review and linked tests do not establish a live pass.
+
+| Capability ID | Action and persisted result | Denial, race and retry checks |
+| --- | --- | --- |
+| `questions-and-approvals/questions` | Create fixed-ID single/multiple/custom/text questions; move between pages, submit, and reload the saved answer and responder. | Reject missing/invalid answers without resolving. Competing answers settle once. Distinguish cancel, withdraw, historical Done-task answers, and local dismissal; historical answers must not restart work. |
+| `questions-and-approvals/dismiss-and-reopen` | Dismiss without submitting, reopen from history, edit the retained draft, and reload in the same browser. | Confirm the server request remains pending and a new ordinary comment does not answer it. Resolve in another tab and refresh the old form. Browser draft/dismissal state is not account-wide state. |
+| `questions-and-approvals/confirmations` | Use separate accept, decline/change-request, checkbox subset, suggested-task selection, and partial item-verdict requests. Inspect the actual selected items and created task IDs. | Test invalid selections, child-without-parent selection, expiry, supersession, withdrawal, and repeated/conflicting decisions. Partial verdicts persist; skip must not start a continuation. |
+| `questions-and-approvals/plan-review` | Open the exact requested plan revision; reject one request and accept another. Inspect saved revision, work mode, owner, and the resulting continuation. | Edit after requesting review and reject stale acceptance. Test finalization readiness and bound completion review separately. In Agent Chat, inspect the later project/task creation and its source-plan provenance; acceptance alone is not a completed handoff. |
+| `questions-and-approvals/audience` | Repeat a request for a named person, named agent, human-only resolver, and independent reviewer. Inspect actionability and final attribution. | Test creator exclusion, wrong audience/company, private task, missing or cancelled run, and changed responsible-user access. A human comment used by an agent remains subject to that agent’s resolver authority. |
+| `questions-and-approvals/governance` | Create and inspect a formal request, comment, request revision, resubmit, then approve or reject distinct requests. Reload history and linked task state. | Test board decision authority separately from agent request/comment/resubmit authority. A repeated decision cannot repeat activation. Current pending status, payload revision, and governed side effects must agree. |
+| `questions-and-approvals/tool-review` | Invoke a harmless Ask first action, compare task and Apps review surfaces, then exercise Approve once, Always allow, and Decline separately. | No provider call before approval. Repeat decisions and compare invocation count. Change the tool definition, revoke access, or set Off before a decision. Record the approval decision and provider outcome independently. |
+| `questions-and-approvals/continuation` | After answering, inspect the saved response, delivery receipt, eligible run, and useful result in the original task/thread. | Reload, race two tabs, and interrupt delivery after saving. Require one continuation without repeated external actions. Reassignment, Stop, pause, budget, and external-thread boundaries remain effective. |
+
 ### `task-thread`
 
 Automated: [interaction cards](../../ui/src/components/IssueThreadInteractionCard.test.tsx),

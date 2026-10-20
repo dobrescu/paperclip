@@ -19,6 +19,7 @@ export const DELIVERY_QUEUES = {
   chatReceipts: "chat-slack-receipts",
   browser: "browser-use",
   email: "email-channels",
+  museMaintenance: "muse-maintenance",
   fastResponse: "fast-responses",
   feedback: "feedback-exports",
   chatCompletion: "chat-completions",

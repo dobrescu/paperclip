@@ -2971,12 +2971,21 @@ describe("TaskChatThread runtime transcript selection", () => {
       cause: "uncertain_provider_action", canRetry: false },
     { adapterType: "claude_local", status: "cancelled", runtimeMode: "legacy" as const,
       cause: "legacy_execution_requires_reconciliation", canRetry: false },
-  ])("offers only explicit conversation retries: $runtimeMode/$adapterType/$status/$cause", (testCase) => {
+  ].flatMap(testCase => [false, true].map(withRecoveryNotice => ({ ...testCase, withRecoveryNotice }))))("offers only explicit conversation retries: $runtimeMode/$adapterType/$status/$cause (recovery notice=$withRecoveryNotice)", async (testCase) => {
+    const retry = vi.fn();
+    const recoveryRetry = vi.fn();
     renderThread({
-      comments: [],
+      comments: testCase.withRecoveryNotice ? [{
+        id: "recovery-after-stop", companyId: "company", issueId: "issue", metadata: null,
+        authorType: "system", authorAgentId: null, authorUserId: null,
+        body: "Paperclip retried continuation, but it still has no live execution path.",
+        presentation: { kind: "system_notice", title: "No live execution path", tone: "danger", detailsDefaultOpen: false },
+        createdAt: new Date("2026-08-25T18:00:03.000Z"), updatedAt: new Date("2026-08-25T18:00:03.000Z"),
+      }] : [],
       onAdd: async () => {},
       issueStatus: "blocked",
-      onRetryFailedRun: vi.fn(),
+      onRetryFailedRun: retry,
+      onTryAgainNoLiveExecutionPath: recoveryRetry,
       linkedRuns: [{
         runId: "stopped-run",
         runtimeMode: testCase.runtimeMode,
@@ -2995,10 +3004,21 @@ describe("TaskChatThread runtime transcript selection", () => {
         },
       }],
     });
-    expect(Boolean(container.querySelector('[data-testid="task-chat-run-failed-try-again"]')))
-      .toBe(testCase.canRetry);
-    if (testCase.canRetry) expect(container.textContent).toContain("You can retry this message now.");
+    const button = container.querySelector<HTMLButtonElement>(testCase.withRecoveryNotice
+      ? '[data-testid="task-chat-no-live-path-try-again"]'
+      : '[data-testid="task-chat-run-failed-try-again"]');
+    expect(Boolean(button)).toBe(testCase.canRetry);
+    if (testCase.withRecoveryNotice) {
+      expect(container.textContent).toContain("No live execution path");
+      expect(container.textContent).not.toContain("Run failed");
+    } else if (testCase.canRetry) expect(container.textContent).toContain("You can retry this message now.");
     else expect(container.textContent).not.toContain("You can retry this message now.");
+    if (button) {
+      flushSync(() => button.click());
+      await Promise.resolve();
+      expect(retry).toHaveBeenCalledExactlyOnceWith("stopped-run");
+    }
+    expect(recoveryRetry).not.toHaveBeenCalled();
   });
 
   it.each(DIRECT_ADAPTER_TYPES)(
@@ -3408,6 +3428,26 @@ describe("TaskChatThread no-live-execution-path recovery", () => {
     createdAt: new Date("2026-08-26T12:00:00.000Z"),
     updatedAt: new Date("2026-08-26T12:00:00.000Z"),
   };
+
+  it.each((["native", "legacy"] as const).flatMap(runtimeMode => [true, false].flatMap(streamlined => [true, false].map(recoveryIsLatest => ({ runtimeMode, streamlined, recoveryIsLatest })))))
+    ("keeps the last adjacent error for $runtimeMode (streamlined=$streamlined, recoveryIsLatest=$recoveryIsLatest)", ({ runtimeMode, streamlined, recoveryIsLatest }) => {
+      streamlinedState.enabled = streamlined;
+      render(<TaskChatThread
+        comments={[noLivePathComment]} onAdd={async () => {}} showComposer={false} issueStatus="blocked"
+        onTryAgainNoLiveExecutionPath={async () => {}}
+        linkedRuns={[{
+          runId: "failed-run", status: "failed", runtimeMode, agentId: "agent-1", agentName: "Coder",
+          adapterType: runtimeMode === "native" ? "paperclip_runner" : "claude_local",
+          createdAt: "2026-08-26T11:58:00.000Z", startedAt: "2026-08-26T11:58:01.000Z",
+          finishedAt: recoveryIsLatest ? "2026-08-26T11:59:00.000Z" : "2026-08-26T12:01:00.000Z",
+          errorCode: "runner_exited",
+        }]}
+      />);
+      expect(container.textContent?.includes("Run failed")).toBe(!recoveryIsLatest);
+      expect(container.textContent?.includes("No live execution path")).toBe(recoveryIsLatest);
+      expect(container.querySelector(".border-dashed")).toBeNull();
+      expect(container.querySelectorAll('button[data-testid$="try-again"]')).toHaveLength(1);
+    });
 
   it("offers Try again only while the task is blocked", async () => {
     const onTryAgain = vi.fn();

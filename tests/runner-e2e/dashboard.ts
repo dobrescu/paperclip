@@ -1,4 +1,7 @@
 import { isIncompleteFirstTaskResult, renderCaseOutcome } from "./case-outcome.js";
+import { campaignSuiteSummaryStyles, renderCampaignSuiteSummary, renderSuiteCaseIndex } from "./campaign-summary.js";
+import { journeyCapabilities, journeyFeatureIds } from "./journey-features.js";
+import { journeyFeatureStyles, renderJourneyFeatureCoverage, renderJourneyFeatureOptions } from "./feature-coverage.js";
 import { STARTUP_REUSE_LAYERS, summarizeStartupReuse } from "../../packages/adapter-utils/src/startup-reuse.js";
 import { renderFirstTaskDetails } from "./first-task-report.js";
 import {
@@ -34,7 +37,6 @@ export interface RunnerDashboardInput {
   entries: readonly RunnerDashboardEntry[];
   campaign?: RunnerE2ECampaign;
   history?: RunnerE2EHistoryIndex;
-  publicSummaryImageHref?: string;
 }
 
 interface ResolvedScreenshot {
@@ -87,17 +89,6 @@ function safeEvidenceHref(base: string | undefined, relative: string) {
     .map(encodeURIComponent)
     .join("/");
   return `${cleanBase}/${cleanRelative}`;
-}
-
-function safePublicAssetHref(relative: string | undefined) {
-  if (!relative || /^(?:[a-z]+:|\/\/|\/)/i.test(relative)) return null;
-  const segments = relative.split("/");
-  if (
-    segments.some((segment) => !segment || segment === "." || segment === "..")
-  ) {
-    return null;
-  }
-  return segments.map(encodeURIComponent).join("/");
 }
 
 function compactJson(value: unknown) {
@@ -178,6 +169,10 @@ function renderCase(
       : item,
   );
   const billing = entry ? summarizeExecutionBilling(entry.result) : null;
+  const capabilities = journeyCapabilities(execution);
+  const features = [...new Map(capabilities.map((capability) => [capability.feature.id, capability.feature])).values()];
+  const outcome = entry ? renderCaseOutcome(entry.result, entry.valid, entry.errors) : "";
+  const passed = state === "passed" && entry?.result.status === "passed";
   const firstTaskChecks = entry?.result.firstTask?.checks;
   const notReached = firstTaskChecks?.filter((c) => c.notReached).length ?? 0;
   const matcherResults = firstTaskChecks?.length
@@ -200,6 +195,7 @@ function renderCase(
     execution.environment.label,
     execution.environment.provider,
     execution.suite.label,
+    ...capabilities.flatMap((capability) => [capability.id, capability.label, capability.feature.title]),
     label,
   ]
     .join(" ")
@@ -222,9 +218,8 @@ function renderCase(
     return href ? [`<a href="${html(href)}">${html(label)}</a>`] : [];
   });
   const links =
-    screenshots.length > 0 || playwright || structuredLinks.length > 0
+    playwright || structuredLinks.length > 0
       ? `<nav class="evidence-links" aria-label="Evidence for ${html(execution.id)}">
-          ${screenshots.map((item) => `<a href="${html(item.href)}" target="_blank" rel="noreferrer">Open ${html(item.label.toLowerCase())}</a>`).join("")}
           ${playwright ? `<a href="${html(playwright)}">Open Playwright report</a>` : ""}
           ${structuredLinks.join("")}
         </nav>`
@@ -302,7 +297,9 @@ function renderCase(
     class="case case-${state}"
     data-execution-id="${html(execution.id)}"
     data-report-case
+    data-report-case-key="${html(`${execution.suite.id}.${execution.task.id}`)}"
     data-report-suite="${html(execution.suite.id)}"
+    data-report-features="${html(journeyFeatureIds(execution).join(" "))}"
     data-report-profile="${html(execution.profile.id)}"
     data-report-environment="${html(execution.environment.id)}"
     data-report-status="${html(state)}"
@@ -312,14 +309,20 @@ function renderCase(
       <strong>${html(execution.task.label)}</strong>
       <span class="status">${html(label)}</span>
     </div>
-    ${entry ? renderCaseOutcome(entry.result, entry.valid, entry.errors) : ""}
+    ${features.length ? `<div class="case-features">${features.map((feature) =>
+      `<button type="button" class="feature-choice" data-report-feature-choice="${html(feature.id)}" title="${html(capabilities.filter((capability) => capability.feature.id === feature.id).map((capability) => capability.id).join(", "))}">${html(feature.title)}</button>`,
+    ).join("")}</div>` : ""}
+    ${passed ? "" : outcome}
+    ${!entry ? `<p class="case-empty">No result artifact was uploaded.</p>` : ""}
     ${gallery}
+    <details class="case-context case-diagnostics">
+      <summary><span>Test details</span><span class="case-detail-summary">${matcherResults.length ? `${passedMatchers}/${matcherResults.length} checks${notReached ? ` · ${notReached} not reached` : ""}` : "No checks recorded"}${entry ? ` · ${html(durationLabel(entry.result.durationMs))}` : ""}</span></summary>
+    ${passed ? outcome : ""}
     ${billingStrip}
     ${links}
     ${renderFirstTaskDetails(entry?.result)}
     <code class="execution-id">${html(execution.id)}</code>
-    <details class="case-context">
-      <summary>Matchers and test context</summary>
+    ${capabilities.length ? `<ul class="case-capabilities" aria-label="Capabilities tested">${capabilities.map((capability) => `<li>${html(capability.feature.title)} · ${html(capability.label)}</li>`).join("")}</ul>` : ""}
     ${
       entry
         ? `<dl>
@@ -633,6 +636,10 @@ function renderSuiteMatrix(input: {
   return `<section class="suite-section" id="suite-${html(suite.id)}">
     <div class="section-heading"><div><p class="eyebrow">Test suite</p><h2>${html(suite.label)}</h2></div><p>${html(suite.description)}</p></div>
     ${summaryHtml}
+    <nav class="suite-case-toc" aria-label="${html(suite.label)} cases">
+      <div class="suite-case-toc-heading"><h3>Cases</h3><a href="#overview">Back to index ↑</a></div>
+      ${renderSuiteCaseIndex(input.suiteCatalog)}
+    </nav>
     <div class="table-kicker"><strong>Configuration matrix</strong><span>${profiles.length} profiles · ${environments.length} environments · ${selected} selected</span></div>
     <div class="table-wrap"><table class="matrix"><colgroup><col class="profile-column">${environments.map(() => '<col class="environment-column">').join("")}</colgroup><thead><tr><th scope="col">Agent profile</th>${environmentHeaders}</tr></thead><tbody>${rows}</tbody></table></div>
   </section>`;
@@ -640,12 +647,12 @@ function renderSuiteMatrix(input: {
 
 
 export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
+  const expected = new Set(input.expected);
   const catalog = discoverReportCatalog({
     catalog: input.catalog,
     expected: input.expected,
     results: input.entries.map((entry) => entry.result),
-  });
-  const expected = new Set(input.expected);
+  }).filter((execution) => expected.has(execution.id));
   const entryById = new Map(
     input.entries.map((entry) => [entry.result.executionId, entry]),
   );
@@ -688,9 +695,6 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
     )
     .join("");
   const historySection = renderHistory(input.history);
-  const publicSummaryImageHref = safePublicAssetHref(
-    input.publicSummaryImageHref,
-  );
   const filterProfiles = [
     ...new Map(
       catalog.map((execution) => [execution.profile.id, execution.profile]),
@@ -748,7 +752,7 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
       --chat-human-foreground: #ffffff;
       --chat-bubble-radius: 1rem;
       --chat-body-size: 0.875rem;
-      --navigation-sticky-offset: 58px;
+      --navigation-sticky-offset: 0px;
       --font-sans: "Paperclip Inter", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     }
@@ -780,6 +784,7 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
       }
     }
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     html { scroll-behavior: smooth; }
     body { margin: 0; background: var(--background); color: var(--foreground); font: 14px/1.5 var(--font-sans); font-feature-settings: "ss01", "cv11"; }
     button, summary, a { -webkit-tap-highlight-color: transparent; }
@@ -805,7 +810,9 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
     .gallery-launch { min-width: 138px; padding: 10px 15px; }
     .gallery-launch:hover, .gallery-control:hover, .gallery-close:hover { border-color: var(--foreground); background: var(--primary); color: var(--primary-foreground); }
     .gallery-launch:focus-visible, .gallery-control:focus-visible, .gallery-close:focus-visible, .screenshot-trigger:focus-visible, .report-filters input:focus-visible, .report-filters select:focus-visible, .filter-reset:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
-    .report-filters { display: grid; grid-template-columns: minmax(240px, 1.6fr) repeat(4, minmax(130px, .7fr)) auto; align-items: end; gap: 10px; margin: 0 0 40px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+    .report-filters { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); align-items: end; gap: 10px; margin: 0 0 40px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+    .report-search { grid-column: span 5; }
+    .report-feature { grid-column: span 2; }
     .report-filters label { display: grid; gap: 5px; min-width: 0; }
     .report-filters label > span { color: var(--muted-foreground); font-size: 10px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
     .report-filters input, .report-filters select, .filter-reset { width: 100%; min-height: 38px; padding: 7px 9px; border: 1px solid var(--border-strong); border-radius: calc(var(--radius) * .8); background: var(--background); color: var(--foreground); }
@@ -847,9 +854,10 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
     .agent-10 { background: linear-gradient(to bottom, #f2d95f, #4fbcba); }
     .generation { display: inline-block; margin-left: 7px; padding: 2px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); font: 500 10px/1.4 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
     .case-stack { display: grid; gap: 12px; }
-    .case { min-width: 0; max-width: 100%; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); overflow: hidden; }
+    .case { min-width: 0; max-width: 100%; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); overflow: hidden; scroll-margin-top: 80px; }
     .case-heading { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
     .case-heading strong { font-size: 14px; font-weight: 650; }
+    .case-empty { margin: 12px 0; color: var(--muted-foreground); font-size: 12px; }
     .status, .matcher-state { display: inline-block; flex: none; padding: 3px 8px; border: 1px solid; border-radius: 999px; font: 600 10px/1.4 var(--font-sans); letter-spacing: .05em; text-transform: uppercase; }
     .case-passed .status, .matcher-passed .matcher-state { border-color: var(--pass-border); background: var(--pass-bg); color: var(--pass-text); }
     .case-failed .status, .matcher-failed .matcher-state { border-color: var(--fail-border); background: var(--fail-bg); color: var(--fail-text); }
@@ -899,9 +907,9 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
     .billing-metric strong { display: block; overflow-wrap: anywhere; font: 550 17px/1.25 var(--font-mono); font-variant-numeric: tabular-nums; }
     .billing-metric span { display: block; margin-top: 4px; color: var(--muted-foreground); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
     .billing-note { grid-column: 1 / -1; margin: 0; padding: 11px 16px; border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: 11px; }
-    .suite-nav { position: sticky; top: 0; z-index: 12; display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 24px; padding: 10px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--background); }
-    .suite-nav a { padding: 7px 10px; border-radius: calc(var(--radius) * .8); color: var(--muted-foreground); font-size: 12px; font-weight: 600; text-decoration: none; }
-    .suite-nav a:hover { background: var(--raised); color: var(--foreground); }
+    .results-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin: 40px 0 20px; }
+    .results-heading h2 { margin: 0; font-size: 24px; }
+    .results-heading a { color: var(--muted-foreground); font-size: 12px; }
     .suite-section, .history-section { scroll-margin-top: calc(var(--navigation-sticky-offset) + 16px); margin-top: 64px; }
     .section-heading { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 520px); align-items: end; gap: 32px; margin-bottom: 24px; }
     .section-heading h2 { margin: 0; font-size: clamp(25px, 3vw, 38px); line-height: 1.05; letter-spacing: -.035em; }
@@ -913,6 +921,10 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
     .suite-summary span, .suite-summary small { color: var(--muted-foreground); font-size: 9px; }
     .suite-summary span { letter-spacing: .06em; text-transform: uppercase; }
     .suite-summary strong { margin: 3px 0 1px; font: 550 15px/1.3 var(--font-mono); }
+    .suite-case-toc { margin: 0 0 24px; }
+    .suite-case-toc-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+    .suite-case-toc-heading h3 { margin: 0; font-size: 13px; font-weight: 600; }
+    .suite-case-toc-heading > a { color: var(--muted-foreground); font-size: 11px; }
     .history-pointers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
     .history-pointers a { padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); text-decoration: none; }
     .history-pointers span, .history-pointers strong { display: block; }
@@ -948,7 +960,16 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
     .history-failed { border-color: var(--fail-border); background: var(--fail-bg); color: var(--fail-text); }
     .history-empty { padding: 24px 0; color: var(--muted-foreground); text-align: center; }
     .case-context > summary, .usage > summary { width: fit-content; cursor: pointer; color: var(--foreground); font-size: 12px; font-weight: 600; }
+    .case-diagnostics { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+    .case-diagnostics > summary { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; width: 100%; list-style: none; }
+    .case-diagnostics > summary::-webkit-details-marker { display: none; }
+    .case-diagnostics > summary::before { content: "›"; color: var(--muted-foreground); font-size: 16px; line-height: 1; }
+    .case-diagnostics[open] > summary::before { transform: rotate(90deg); }
+    .case-detail-summary { margin-left: auto; color: var(--muted-foreground); font: 400 11px/1.5 var(--font-mono); }
+    .case-capabilities { padding-left: 16px; color: var(--muted-foreground); font-size: 11px; }
     .case-outcome { margin: 12px 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--raised); font-size: 12px; }
+    .case-incomplete > .case-outcome { border-color: var(--missing-border); }
+    .case-failed > .case-outcome { border-color: var(--fail-border); }
     .case-outcome p { margin: 8px 0; }
     .failure-reason { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 var(--font-mono); }
     .conversation-details { margin: 16px 0; }
@@ -1033,6 +1054,8 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
     .gallery-previous { left: 24px; }
     .gallery-next { right: 24px; }
     .gallery-position { color: #b8b8b5; font: 12px/1.4 var(--font-mono); font-variant-numeric: tabular-nums; }
+    .gallery-original { color: #fafafa; font-size: 12px; }
+    .back-to-top { position: fixed; right: max(24px, env(safe-area-inset-right)); bottom: max(24px, env(safe-area-inset-bottom)); z-index: 10; display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 10px 16px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--foreground); color: var(--background); font: 600 12px/1.4 var(--font-sans); text-decoration: none; }
     @media (max-width: 1180px) {
       .matrix { display: block; min-width: 0; }
       .matrix thead { display: none; }
@@ -1063,8 +1086,7 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
       .trend-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .history-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .report-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .report-search, .filter-result { grid-column: 1 / -1; }
-      .suite-nav { top: 0; }
+      .report-search, .report-feature, .filter-result { grid-column: 1 / -1; }
       .suite-section, .history-section { scroll-margin-top: 72px; }
     }
     @media (max-width: 640px) {
@@ -1085,11 +1107,9 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
       .gallery-control { width: 40px; height: 56px; }
       .gallery-previous { left: 8px; }
       .gallery-next { right: 8px; }
-      .suite-nav { top: 0; overflow-x: auto; flex-wrap: nowrap; }
-      .suite-nav a { white-space: nowrap; }
       .history-pointers, .trend-grid, .history-filters { grid-template-columns: 1fr; }
       .report-filters { grid-template-columns: 1fr; }
-      .report-search, .filter-result { grid-column: auto; }
+      .report-search, .report-feature, .filter-result { grid-column: auto; }
       .suite-summary { grid-template-columns: 1fr; }
       .suite-summary > div, .suite-summary > div:nth-child(even) { border-right: 0; border-bottom: 1px solid var(--border); }
       .suite-summary > div:last-child { border-bottom: 0; }
@@ -1098,8 +1118,8 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 100ms !important; }
     }
-    .public-summary { margin: 0 0 32px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--raised); }
-    .public-summary img { display: block; width: 100%; height: auto; border-radius: 6px; }
+    ${campaignSuiteSummaryStyles}
+    ${journeyFeatureStyles}
     @media print {
       .brand-bar, .gallery-launch, dialog { display: none; }
       main { width: 100%; margin: 0; }
@@ -1108,7 +1128,7 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
     }
   </style>
 </head>
-<body>
+<body id="top">
   <div class="brand-bar">
     <a class="brand-lockup" href="https://paperclip.ing" aria-label="Paperclip home">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"/></svg>
@@ -1120,7 +1140,7 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
     <header class="report-header">
       <div>
         <p class="eyebrow">Full-stack acceptance campaign</p>
-        <h1>${html(input.title)}</h1>
+        <h1 tabindex="-1">${html(input.title)}</h1>
         <p class="lede">A browser-verified matrix of runner profiles, execution environments, and deterministic task contracts. Declared PNG screenshots and normalized results are retained with every published campaign; additional diagnostic evidence remains in the access-controlled workflow artifact.</p>
       </div>
       <div class="report-actions">
@@ -1133,7 +1153,7 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
         <button class="gallery-launch" type="button" data-gallery-open ${screenshotCount === 0 ? "disabled" : ""}>${screenshotCount === 0 ? "Visual evidence · workflow artifact only" : `View gallery · ${screenshotCount}`}</button>
       </div>
     </header>
-    ${publicSummaryImageHref ? `<figure class="public-summary"><img src="${html(publicSummaryImageHref)}" alt="Runner E2E campaign status summary"></figure>` : ""}
+    ${renderCampaignSuiteSummary(input.campaign?.suites ?? [], catalog, "", true)}
     <section class="billing-overview" aria-label="Campaign billing summary">
       <div class="billing-metric"><strong>${html(tokenLabel(campaignBilling.llm.inputTokens, campaignBilling.llm))}</strong><span>Input tokens</span></div>
       <div class="billing-metric"><strong>${html(tokenLabel(campaignBilling.llm.outputTokens, campaignBilling.llm))}</strong><span>Output tokens</span></div>
@@ -1147,24 +1167,23 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
       <div class="billing-metric"><strong>${campaignBilling.llm.runsWithReportedCost}/${campaignBilling.llm.runCount}</strong><span>Runs provider-priced</span></div>
       <p class="billing-note">Model spend is the provider-reported subtotal; unpriced or unavailable runs are excluded, never counted as free. Daytona runtime is a public-list-price estimate from captured lease time and pinned resources, before credits, discounts, storage allowance, or invoice adjustments. Local execution has no external runtime meter.</p>
     </section>
-    <nav class="suite-nav" aria-label="Report sections">
-      <a href="#overview">Overview</a>
-      ${suites.map((suite) => `<a href="#suite-${html(suite.id)}">${html(suite.label)}</a>`).join("")}
-      <a href="#history">History</a>
-    </nav>
+    <div class="results-heading" id="results"><h2>Results</h2><a href="#history">Campaign history</a></div>
+    ${renderJourneyFeatureCoverage(catalog, entryById)}
     <section class="report-filters" aria-label="Filter test results">
       <label class="report-search"><span>Search tests</span><input type="search" placeholder="Test, model, provider, execution ID…" autocomplete="off" data-report-query></label>
+      <button class="filter-reset" type="button" data-report-reset>Reset</button>
+      <label class="report-feature"><span>Feature</span><select data-report-feature><option value="">All features</option>${renderJourneyFeatureOptions(catalog)}</select></label>
       <label><span>Agent profile</span><select data-report-profile><option value="">All profiles</option>${filterProfiles.map((profile) => `<option value="${html(profile.id)}">${html(profile.label)}</option>`).join("")}</select></label>
       <label><span>Environment</span><select data-report-environment><option value="">All environments</option>${filterEnvironments.map((environment) => `<option value="${html(environment.id)}">${html(environment.label)}</option>`).join("")}</select></label>
       <label><span>Suite</span><select data-report-suite><option value="">All suites</option>${suites.map((suite) => `<option value="${html(suite.id)}">${html(suite.label)}</option>`).join("")}</select></label>
-      <label><span>Status</span><select data-report-status><option value="">All statuses</option><option value="passed">Passed</option><option value="failed">Failed</option><option value="incomplete">Incomplete</option><option value="missing">Missing</option><option value="not-selected">Not selected</option></select></label>
-      <button class="filter-reset" type="button" data-report-reset>Reset</button>
+      <label><span>Status</span><select data-report-status><option value="">All statuses</option><option value="passed">Passed</option><option value="failed">Failed</option><option value="incomplete">Incomplete</option><option value="missing">Missing</option></select></label>
       <p class="filter-result" data-report-result aria-live="polite"></p>
     </section>
     ${suiteSections}
     ${historySection}
-    <footer><span>Generated ${html(input.generatedAt)}</span><span>${catalog.length} catalog executions · Declared screenshots and normalized results published</span></footer>
+    <footer><span>Generated ${html(input.generatedAt)}</span><span>${catalog.length} selected executions · Declared screenshots and normalized results published</span></footer>
   </main>
+  <a class="back-to-top" href="#top" data-back-to-top hidden><span aria-hidden="true">↑</span>Back to top</a>
   <dialog class="gallery-dialog" data-gallery-dialog aria-labelledby="gallery-title">
     <div class="gallery-shell">
       <div class="gallery-toolbar">
@@ -1192,10 +1211,26 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
       </div>
       <div class="gallery-footer">
         <span class="gallery-position" data-gallery-position aria-live="polite"></span>
+        <a class="gallery-original" data-gallery-original target="_blank" rel="noreferrer">Open original image ↗</a>
       </div>
     </div>
   </dialog>
   <script>
+    (() => {
+      const backToTop = document.querySelector("[data-back-to-top]");
+      const update = () => { backToTop.hidden = window.scrollY < window.innerHeight; };
+      window.addEventListener("scroll", update, { passive: true });
+      window.addEventListener("resize", update);
+      backToTop.addEventListener("click", (event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        window.scrollTo({ top: 0, behavior: "instant" });
+        if (location.hash !== "#top") history.pushState(null, "", "#top");
+        document.querySelector(".report-header h1").focus({ preventScroll: true });
+        update();
+      });
+      update();
+    })();
     document.addEventListener("click", (event) => {
       const link = event.target.closest("a[href^='#first-task-']");
       if (!link) return;
@@ -1223,6 +1258,7 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
       const tokens = dialog.querySelector("[data-gallery-tokens]");
       const matchers = dialog.querySelector("[data-gallery-matchers]");
       const position = dialog.querySelector("[data-gallery-position]");
+      const original = dialog.querySelector("[data-gallery-original]");
       const stage = dialog.querySelector("[data-gallery-stage]");
       let activeItem = items[0];
       let pointerStartX = null;
@@ -1237,6 +1273,7 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
         }
         const item = activeItem;
         image.src = item.dataset.galleryHref;
+        original.href = item.dataset.galleryHref;
         image.alt = item.dataset.galleryLabel + " for " + item.dataset.galleryExecution;
         title.textContent = item.dataset.galleryLabel;
         execution.textContent = item.dataset.galleryExecution;
@@ -1298,6 +1335,7 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
       const cases = Array.from(document.querySelectorAll("[data-report-case]"));
       if (cases.length === 0) return;
       const query = document.querySelector("[data-report-query]");
+      const feature = document.querySelector("[data-report-feature]");
       const profile = document.querySelector("[data-report-profile]");
       const environment = document.querySelector("[data-report-environment]");
       const suite = document.querySelector("[data-report-suite]");
@@ -1305,12 +1343,20 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
       const reset = document.querySelector("[data-report-reset]");
       const result = document.querySelector("[data-report-result]");
       const galleryLaunch = document.querySelector("[data-gallery-open]");
+      const caseLinks = Array.from(document.querySelectorAll("[data-report-case-link]"));
+      const casesByKey = new Map();
+      cases.forEach((item) => {
+        const key = item.dataset.reportCaseKey;
+        if (!casesByKey.has(key)) casesByKey.set(key, []);
+        casesByKey.get(key).push(item);
+      });
       const apply = () => {
         const search = query.value.trim().toLowerCase();
         let visible = 0;
         cases.forEach((item) => {
           const matches =
             (!search || item.dataset.reportSearch.includes(search)) &&
+            (!feature.value || (feature.value === "__unmapped__" ? !item.dataset.reportFeatures : item.dataset.reportFeatures.split(" ").includes(feature.value))) &&
             (!profile.value || item.dataset.reportProfile === profile.value) &&
             (!environment.value || item.dataset.reportEnvironment === environment.value) &&
             (!suite.value || item.dataset.reportSuite === suite.value) &&
@@ -1324,6 +1370,26 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
         document.querySelectorAll(".suite-section").forEach((section) => {
           section.hidden = !section.querySelector("[data-report-case]:not([hidden])");
         });
+        caseLinks.forEach((link) => {
+          const variants = casesByKey.get(link.dataset.reportCaseLink);
+          const matching = variants.filter((item) => !item.hidden);
+          const selection = matching.length ? matching : variants;
+          const counts = { passed: 0, failed: 0, incomplete: 0, missing: 0 };
+          selection.forEach((item) => { counts[item.dataset.reportStatus] += 1; });
+          const state = counts.failed ? "failed" : counts.incomplete ? "incomplete" : counts.missing ? "missing" : "passed";
+          const label = { passed: "Passed", failed: "Failed", incomplete: "Incomplete", missing: "Missing result" }[state];
+          const context = matching.length === variants.length ? "All configurations" : matching.length ? "Matching configurations" : "All configurations (none match current filters)";
+          const description = label + " · " + counts.passed + "/" + selection.length + " passed"
+            + (counts.failed ? " · " + counts.failed + " failed" : "")
+            + (counts.incomplete ? " · " + counts.incomplete + " incomplete" : "")
+            + (counts.missing ? " · " + counts.missing + " missing" : "")
+            + " — " + context;
+          const target = selection.find((item) => item.dataset.reportStatus === state) || selection[0];
+          link.dataset.caseStatus = state;
+          link.setAttribute("title", description);
+          link.setAttribute("aria-description", description);
+          link.setAttribute("href", "#execution-" + target.dataset.executionId);
+        });
         const visibleImages = cases.reduce(
           (total, item) => total + (item.hidden ? 0 : item.querySelectorAll("[data-gallery-item]").length),
           0,
@@ -1334,17 +1400,48 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
           galleryLaunch.textContent = visibleImages === 0 ? "No visual evidence in selection" : "View gallery · " + visibleImages;
         }
       };
-      [query, profile, environment, suite, status].forEach((control) => {
+      const controls = [query, feature, profile, environment, suite, status];
+      const clearFilters = () => {
+        controls.forEach((control) => { control.value = ""; });
+      };
+      const revealTarget = (hash) => {
+        if (!hash.startsWith("#suite-") && !hash.startsWith("#execution-")) return false;
+        const target = document.getElementById(hash.slice(1));
+        if (!target || !target.matches(".suite-section, [data-report-case]")) return false;
+        if (target.hidden) {
+          clearFilters();
+          apply();
+        }
+        requestAnimationFrame(() => {
+          target.scrollIntoView({ block: "start", behavior: "instant" });
+        });
+        return true;
+      };
+      document.querySelectorAll('a[href^="#suite-"], a[href^="#execution-"]').forEach((link) => {
+        link.addEventListener("click", (event) => {
+          if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          const hash = link.getAttribute("href");
+          if (!revealTarget(hash)) return;
+          event.preventDefault();
+          if (location.hash !== hash) history.pushState(null, "", hash);
+        });
+      });
+      window.addEventListener("hashchange", () => { revealTarget(location.hash); });
+      controls.forEach((control) => {
         control.addEventListener(control === query ? "input" : "change", apply);
       });
       reset.addEventListener("click", () => {
-        query.value = "";
-        profile.value = "";
-        environment.value = "";
-        suite.value = "";
-        status.value = "";
+        clearFilters();
         apply();
         query.focus();
+      });
+      document.querySelectorAll("[data-report-feature-choice]").forEach((button) => {
+        button.addEventListener("click", () => {
+          feature.value = button.dataset.reportFeatureChoice;
+          apply();
+          document.querySelector(".feature-coverage").open = false;
+          document.getElementById("results").scrollIntoView({ block: "start" });
+        });
       });
       document.addEventListener("keydown", (event) => {
         if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -1354,6 +1451,7 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
         query.focus();
       });
       apply();
+      revealTarget(location.hash);
     })();
   </script>
   <script>

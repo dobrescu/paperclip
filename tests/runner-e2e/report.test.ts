@@ -319,10 +319,10 @@ describe("runner E2E report aggregation", () => {
     expect(dashboard).toContain("Runner Full-Stack E2E");
     expect(dashboard).toContain(executionId);
     expect(dashboard).toContain("case-passed");
-    expect(dashboard).toContain(
+    expect(dashboard).not.toContain(
       "core-compatibility.runner-acpx-codex.daytona.message-marker",
     );
-    expect(dashboard).toContain("case-not-selected");
+    expect(dashboard).not.toContain('class="case case-not-selected"');
     expect(dashboard).toContain("<img");
     expect(dashboard).toContain('class="brand-lockup"');
     expect(dashboard).toContain("data-gallery-dialog");
@@ -339,7 +339,7 @@ describe("runner E2E report aggregation", () => {
       "Declared screenshots and normalized results published",
     );
     expect(dashboard).toContain("message_contains");
-    expect(dashboard).toContain("Matchers and test context");
+    expect(dashboard).toContain("Test details");
     expect(dashboard).toContain("Scheduler");
     expect(dashboard).toContain("Run duration");
     expect(dashboard).toContain("100ms");
@@ -361,9 +361,9 @@ describe("runner E2E report aggregation", () => {
     expect(dashboard).toContain("data-report-profile");
     expect(dashboard).toContain("data-report-environment");
     expect(dashboard).toContain("data-report-status");
-    expect(dashboard.indexOf('class="report-filters"')).toBeGreaterThan(
-      dashboard.indexOf('class="suite-nav"'),
-    );
+    expect(dashboard).not.toContain('class="suite-nav"');
+    expect(dashboard).toContain("data-report-feature");
+    expect(dashboard).toContain("Feature coverage");
     expect(dashboard).not.toContain(".report-filters { position: sticky");
     expect(dashboard).toContain("table-layout: fixed");
     expect(dashboard).toContain('class="profile-column"');

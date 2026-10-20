@@ -1,3 +1,5 @@
+import { runnerMatrix } from "./catalog.js";
+import { campaignSuiteSummaryStyles, renderCampaignSuiteSummary } from "./campaign-summary.js";
 import type {
   RunnerE2EHistoryCampaign,
   RunnerE2EHistoryIndex,
@@ -35,17 +37,6 @@ function date(value: string) {
     timeStyle: "short",
     timeZone: "UTC",
   }).format(new Date(value));
-}
-
-function safeRelativeAssetHref(relative: string | undefined) {
-  if (!relative || /^(?:[a-z]+:|\/\/|\/)/i.test(relative)) return null;
-  const segments = relative.split("/");
-  if (
-    segments.some((segment) => !segment || segment === "." || segment === "..")
-  ) {
-    return null;
-  }
-  return segments.map(encodeURIComponent).join("/");
 }
 
 function campaignStatus(campaign: RunnerE2EHistoryCampaign) {
@@ -112,7 +103,6 @@ function campaignRow(campaign: RunnerE2EHistoryCampaign) {
 
 export function renderRunnerHistoryIndex(
   history: RunnerE2EHistoryIndex,
-  options: { latestSummaryImageHref?: string } = {},
 ) {
   const campaigns = [...history.campaigns].sort((left, right) =>
     right.generatedAt.localeCompare(left.generatedAt),
@@ -134,9 +124,6 @@ export function renderRunnerHistoryIndex(
     campaigns.length > 0
       ? campaigns.map(campaignRow).join("")
       : `<tr><td class="empty" colspan="9">No campaigns have been published yet.</td></tr>`;
-  const latestSummaryImageHref = safeRelativeAssetHref(
-    options.latestSummaryImageHref,
-  );
 
   return `<!doctype html>
 <html lang="en">
@@ -173,8 +160,13 @@ export function renderRunnerHistoryIndex(
     .pointers { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:16px; }
     .pointers a { padding:8px 11px; border:1px solid var(--border); border-radius:7px; background:var(--raised); font-size:12px; text-decoration:none; }
     .pointers a:hover,.campaign-link:hover,.open-cell a:hover { text-decoration:underline; }
-    .latest-summary { margin:0 0 24px; padding:12px; border:1px solid var(--border); border-radius:10px; background:var(--raised); }
-    .latest-summary img { display:block; width:100%; height:auto; border-radius:6px; }
+    .latest-campaign { margin-bottom:32px; }
+    .latest-campaign-heading { display:flex; flex-wrap:wrap; align-items:baseline; gap:12px; margin-bottom:20px; }
+    .latest-campaign-heading h2 { margin:0; font-size:18px; font-weight:600; }
+    .latest-metrics { display:flex; flex-wrap:wrap; gap:24px 48px; margin:0 0 16px; }
+    .latest-metrics dt { color:var(--muted); font-size:11px; }
+    .latest-metrics dd { margin:4px 0 0; font:600 24px/1.2 var(--mono); }
+    ${campaignSuiteSummaryStyles}
     .table-wrap { border-top:1px solid var(--border); border-bottom:1px solid var(--border); }
     table { width:100%; border-collapse:collapse; }
     th,td { padding:14px 12px; border-bottom:1px solid var(--border); text-align:left; vertical-align:top; }
@@ -226,7 +218,15 @@ export function renderRunnerHistoryIndex(
         <div class="metric"><strong>${html(usd(totalCost))}</strong><span>Recorded cost</span></div>
       </div>
     </header>
-    ${latestSummaryImageHref ? `<figure class="latest-summary"><img src="${html(latestSummaryImageHref)}" alt="Latest runner E2E campaign status summary"></figure>` : ""}
+    ${latest ? `<section class="latest-campaign" aria-label="Latest campaign summary">
+      <div class="latest-campaign-heading"><h2>Latest campaign</h2><a class="campaign-link" href="${html(latest.publicUrl)}">${html(latest.campaignId)}</a></div>
+      <dl class="latest-metrics">
+        <div><dt>Passed</dt><dd>${latest.passed}/${latest.selected}</dd></div>
+        <div><dt>Failed or incomplete</dt><dd>${latest.failed + (latest.incomplete ?? 0)}</dd></div>
+        <div><dt>Test time</dt><dd>${html(duration(latest.suites.reduce((total, suite) => total + suite.durationMs, 0)))}</dd></div>
+      </dl>
+      ${renderCampaignSuiteSummary(latest.suites, runnerMatrix, latest.publicUrl)}
+    </section>` : ""}
     <nav class="pointers" aria-label="Campaign pointers">
       ${latest ? `<a href="${html(latest.publicUrl)}">Latest run · ${html(latest.campaignId)}</a>` : ""}
       ${latestGreen ? `<a href="${html(latestGreen.publicUrl)}">Latest complete green · ${html(latestGreen.campaignId)}</a>` : ""}

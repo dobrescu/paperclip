@@ -289,19 +289,17 @@ describe("runner E2E campaign history", () => {
     expect(dashboard).toContain("Suite pass rate");
     expect(dashboard).toContain("lines break at definition changes");
     expect(dashboard).toContain("cleanup passed");
-    const index = renderRunnerHistoryIndex(history, {
-      latestSummaryImageHref:
-        "campaigns/complete-red/public-images/campaign-summary.png",
-    });
+    const index = renderRunnerHistoryIndex(history);
     expect(index).toContain("Runner E2E campaigns");
     expect(index).toContain("complete-green");
     expect(index).toContain("complete-red");
     expect(index).toContain(`${runnerMatrix.length}/${runnerMatrix.length} passed`);
     expect(index).toContain(`${runnerMatrix.length - 1}/${runnerMatrix.length} passed`);
     expect(index).toContain("Open report&nbsp;→");
-    expect(index).toContain(
-      "campaigns/complete-red/public-images/campaign-summary.png",
-    );
+    expect(index).toContain('aria-label="Latest campaign summary"');
+    expect(index).toContain('aria-label="Suite results"');
+    expect(index).toContain("Core Runner Compatibility</a>");
+    expect(index).not.toContain("campaign-summary.png");
     expect(index).toContain(
       "declared screenshots, and normalized results",
     );
@@ -605,11 +603,11 @@ describe("historical publication security", () => {
     ).toBe(true);
     await regenerateRunnerDashboard({
       bundle: root,
-      publicSummaryImageHref: "public-images/campaign-summary.png",
     });
-    expect(await readFile(path.join(root, "index.html"), "utf8")).toContain(
-      'src="public-images/campaign-summary.png"',
-    );
+    const dashboardHtml = await readFile(path.join(root, "index.html"), "utf8");
+    expect(dashboardHtml).toContain('aria-label="Suite results"');
+    expect(dashboardHtml).toContain(`${execution.suite.label}</a>`);
+    expect(dashboardHtml).not.toContain('src="public-images/campaign-summary.png"');
     const manifest = await createBundleManifest(
       root,
       campaign.campaignId,

@@ -253,6 +253,28 @@ pnpm test:e2e:runner -- --list --suite completion-updates
 pnpm test:e2e:runner -- --suite completion-updates
 ```
 
+## Local report design preview
+
+Iterate on the public history and individual campaign reports with retained real
+data, without starting Paperclip, loading credentials, or calling providers:
+
+```sh
+node --watch --import ./cli/node_modules/tsx/dist/loader.mjs tests/runner-e2e/preview.ts
+```
+
+Open `http://127.0.0.1:4317/runner-e2e/`. The preview uses the production
+`history-index.ts` and `dashboard.ts` renderers. Changes restart the preview
+and reload the browser. Every history link opens a locally rendered report;
+normalized results, public screenshots, and other manifest-listed public evidence
+are downloaded on first access and cached under the ignored
+`tests/runner-e2e/results/design-preview/` directory. Original grades, billing,
+timestamps, and source provenance are retained. No results are republished.
+
+Use `--port 4320` for another port, `--refresh` to refresh the history snapshot,
+or `--offline` to require cached data. Offline mode supports reports and assets
+already visited; it reports uncached artifacts explicitly. The preview contains
+only published evidence, not private Playwright traces or videos.
+
 ## Credentials
 
 Copy `.env.runner-e2e.example` to `.env.runner-e2e.local` and fill only the
@@ -757,7 +779,41 @@ captures remain failed evidence; qualifying a fix requires a new live attempt.
 Every completed local campaign also writes
 `tests/runner-e2e/results/<campaign>/dashboard.html`. The self-contained page
 shows the complete profile/environment grid with screenshot thumbnails.
-Expanding a case shows its matchers, pass/fail details, provider/model/runtime,
+The history homepage and campaign report render their campaign summaries as
+selectable HTML text, with suite links, pass counts, status, and timing.
+Campaign reports render only selected executions, including selected cases with
+missing evidence or startup failures. Search and feature/suite/profile filters
+replace the full-catalog sticky index.
+Each suite in the campaign report summary folds open to a list of its selected cases.
+The same case links appear at the start of the suite, with a return to the top
+index. Cases appear once across agent/environment configurations; links prefer
+a result matching the active filters and clear conflicting filters when needed
+to reveal their destination.
+Case links show a green status dot when all matching configurations passed,
+red when any failed, and amber for incomplete or missing results. Their tooltip
+summarizes the configurations behind the status; red links prefer a failing
+result. The status follows the active filters, falling back to the whole case
+when none of its configurations match.
+
+`journey-features.ts` associates exact suite/case identities with the stable
+capability IDs from `maps/feature-map/`. The feature selector uses the map's
+existing sections and titles. The expandable Feature coverage view separates
+capability associations, linked test outcomes, gaps, and unmapped journeys.
+These display-only associations do not change prompts, graders, definitions,
+or retained results. Historical reports use the current associations, not a
+claim that those annotations were recorded by the original run. A linked,
+passing scenario does not establish complete capability coverage. Extend the
+associations only after inspecting the journey's assertions; unknown cases stay
+unmapped rather than inheriting coverage from a similarly named suite.
+
+Passing cards emphasize screenshots and show checks and duration beside a
+single Test details disclosure. That disclosure holds billing, evidence links,
+execution identity, and diagnostics; failed and incomplete results keep their
+explanations visible. Screenshots open the gallery, which also links to the
+original image. A floating Back to top control returns to the report heading
+without clearing filters.
+
+Expanding Test details shows matchers, pass/fail details, provider/model/runtime,
 timings, token and cost accounting, and evidence links. The campaign header
 aggregates input, output, and cached tokens, provider-reported LLM spend,
 Daytona list-price runtime estimates, and pricing coverage. Missing provider
