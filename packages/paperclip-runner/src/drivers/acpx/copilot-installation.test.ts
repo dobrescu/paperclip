@@ -85,9 +85,16 @@ async function withCopilotTestPlatform<T>(arch: "x64" | "arm64", run: () => Prom
 vi.mock("./installation-integrity.js", () => ({ verifyNativeAcpxInstallation: vi.fn() }));
 
 describe("Copilot build-owned installation", () => {
-  it("admits the qualified profile without a pending qualification marker", () => {
-    expect(QUALIFIED_ACPX_PROFILES.copilot.agentProfileVersion).toBe(47);
-    expect(QUALIFIED_ACPX_PROFILES.copilot.qualificationStatus).toBeUndefined();
+  it("keeps the changed shared source profile pending fresh qualification", () => {
+    expect(QUALIFIED_ACPX_PROFILES.copilot.agentProfileVersion).toBe(48);
+    expect(QUALIFIED_ACPX_PROFILES.copilot.qualificationStatus).toBe("pending");
+  });
+
+  it("preserves the prior qualified declaration when shared runtime source changes", () => {
+    const prior = JSON.parse(readFileSync(new URL("../../../test/fixtures/copilot-profile-v47-identity.json", import.meta.url), "utf8"));
+    expect(prior.declaration.agentProfileVersion).toBe(47);
+    expect(isSupportedAcpxProfileVersion("copilot", 47)).toBe(true);
+    expect(prior.commandDigest).not.toBe(QUALIFIED_ACPX_PROFILES.copilot.commandDigest);
   });
 
   it("preserves v12 history and changes only the version and four shared source bindings", () => {

@@ -1,3 +1,4 @@
+import { installedCodexCredentialSource } from "./codex-credentials.js";
 import { fork, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -1860,3 +1861,11 @@ async function waitForChildExit(child: ChildProcess): Promise<void> {
     });
   });
 }
+
+it("selects the Runner-installed Codex account without Core credentials", () => {
+  expect(installedCodexCredentialSource({ CODEX_HOME: "/installed/codex", HOME: "/other" })).toBe("/installed/codex/auth.json");
+  expect(installedCodexCredentialSource({ HOME: "/installed/user" })).toBe("/installed/user/.codex/auth.json");
+  for (const key of ["CODEX_API_KEY", "OPENAI_API_KEY", "PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET"]) {
+    expect(installedCodexCredentialSource({ CODEX_HOME: "/installed/codex", [key]: "fixture" })).toBeUndefined();
+  }
+});

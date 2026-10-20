@@ -255,6 +255,9 @@ impl AcpxSidecarTransport {
             // The sidecar checks this controller-minted provider/session marker.
             keys.push("PAPERCLIP_ACPX_CREDENTIAL_BINDING");
         }
+        if agent == "codex" {
+            keys.push("CODEX_HOME");
+        }
         if agent == "claude" {
             keys.extend_from_slice(&[
                 "ANTHROPIC_BASE_URL",

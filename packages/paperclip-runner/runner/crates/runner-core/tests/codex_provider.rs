@@ -54,6 +54,10 @@ fn provider_config(directory: &Path, switches: &[&str]) -> CodexProviderConfig {
     ];
     args.extend(switches.iter().map(|value| (*value).to_owned()));
     CodexProviderConfig {
+        runtime_ownership: None,
+        runtime_context: None,
+        runtime_directory: None,
+        opencode_permission_mode: None,
         provider: "codex".to_owned(),
         driver: "codex_app_server".to_owned(),
         provider_version: "fake-1".to_owned(),

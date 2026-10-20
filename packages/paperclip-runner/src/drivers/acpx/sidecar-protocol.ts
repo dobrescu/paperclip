@@ -52,6 +52,7 @@ export interface AcpxSidecarOpenParams {
   providerPolicy?: { readOnly: boolean };
   systemInstructions: string;
   runtimeContext: NativeRuntimeContextSnapshot | null;
+  runtimeOwnership?: "agent_home";
   tools: readonly Readonly<Record<string, unknown>>[];
   providerSessionKey?: string;
   expectedIdentity?: AcpxExpectedSessionIdentity;

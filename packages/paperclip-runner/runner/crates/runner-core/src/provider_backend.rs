@@ -2244,6 +2244,9 @@ impl CodexCommandExecutor {
         })?;
         // This field used to be discarded for every facade. Keep non-Codex
         // persisted profiles unchanged even when an older controller sends it.
+        if config.runtime_ownership.is_none() {
+            config.runtime_context = None;
+        }
         if config.provider != "codex" {
             config.include_skill_instructions = None;
         }
@@ -2412,8 +2415,8 @@ impl CodexCommandExecutor {
     }
 
     // Only the authenticated controller can rebind these run-scoped launch
-    // settings. Executable, model, instructions, approval mode, and all other
-    // flags remain part of the immutable durable provider profile.
+    // settings. Installed instruction text can refresh at a new run boundary;
+    // executable, model, approval mode, and assignment policy remain pinned.
     fn stable_launch_args(args: &[String]) -> Vec<String> {
         let mut stable = Vec::new();
         let mut index = 0;
@@ -2476,11 +2479,15 @@ impl CodexCommandExecutor {
                 DurableRunnerError::invalid("run.attach runtime launch arguments are invalid")
             })?;
         let mut upgraded_skill_config = false;
+        let mut installed_runtime_changed = false;
         if let Some(provider) = payload.get("provider") {
             let mut config: CodexProviderConfig = serde_json::from_value(provider.clone())
                 .map_err(|error| {
                     DurableRunnerError::invalid(format!("run.attach provider is invalid: {error}"))
                 })?;
+            if config.runtime_ownership.is_none() {
+                config.runtime_context = None;
+            }
             if config.provider != "codex" {
                 config.include_skill_instructions = None;
             }
@@ -2504,6 +2511,45 @@ impl CodexCommandExecutor {
             {
                 next_state.config.include_skill_instructions = config.include_skill_instructions;
                 upgraded_skill_config = true;
+            }
+            if config.runtime_ownership.as_deref() == Some("agent_home")
+                && next_state.config.runtime_ownership.as_deref() == Some("agent_home")
+            {
+                let mut comparison = config.clone();
+                comparison.instructions = next_state.config.instructions.clone();
+                comparison.runtime_context = next_state.config.runtime_context.clone();
+                let identity = |context: &Option<Value>| {
+                    context
+                        .as_ref()
+                        .filter(|value| value.is_object())
+                        .and_then(crate::acpx_provider_backend::runtime_context_session_identity)
+                };
+                let compatible = (config.instructions == next_state.config.instructions
+                    && config.runtime_context == next_state.config.runtime_context)
+                    || identity(&config.runtime_context)
+                        .zip(identity(&next_state.config.runtime_context))
+                        .is_some_and(|(current, prior)| current == prior);
+                installed_runtime_changed = config.instructions != next_state.config.instructions
+                    || config.runtime_context != next_state.config.runtime_context;
+                let new_run = self.event_identity.as_ref().is_some_and(|identity| {
+                    payload
+                        .pointer("/paperclipNextAuthority/identity/runId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id != identity.run_id)
+                        && payload
+                            .pointer("/paperclipNextAuthority/identity/normalizedSessionId")
+                            .and_then(Value::as_str)
+                            == Some(identity.normalized_session_id.as_str())
+                });
+                if comparison != next_state.config
+                    || !compatible
+                    || (installed_runtime_changed && !new_run)
+                {
+                    return Err(DurableRunnerError::invalid(
+                        "run.attach changed installed provider policy or same-run instructions",
+                    ));
+                }
+                next_state.config = config.clone();
             }
             if config != next_state.config {
                 return Err(DurableRunnerError::invalid(
@@ -2554,6 +2600,7 @@ impl CodexCommandExecutor {
         next_state.last_agent_message = None;
         let retained_provider = if let Some(provider) = self.provider.as_mut() {
             !runtime_launch_changed
+                && !installed_runtime_changed
                 && !upgraded_skill_config
                 && provider
                     .attach_run_in_place(
@@ -5077,6 +5124,10 @@ mod tests {
     fn opencode_result_state() -> CodexProviderState {
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "opencode".to_owned(),
                 driver: "opencode_server".to_owned(),
                 provider_version: "1.18.34".to_owned(),
@@ -5176,7 +5227,9 @@ mod tests {
         let mut executor = CodexCommandExecutor::new(&directory);
         executor.restore().unwrap();
         assert!(executor.provider.is_none());
-        executor.attach_run(&json!({})).unwrap();
+        let mut legacy = serde_json::to_value(&state.config).unwrap();
+        legacy["runtimeContext"] = json!({"mcp": {"bindingId": "next-run"}});
+        executor.attach_run(&json!({"provider": legacy})).unwrap();
         assert!(executor.provider.is_none());
         let rebound = executor.state.as_ref().unwrap();
         assert_eq!(rebound.lifecycle, "prepared");
@@ -5185,6 +5238,101 @@ mod tests {
         assert!(rebound.pending_events.is_empty());
         assert!(rebound.queued_events.is_empty());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn installed_instruction_refresh_preserves_codex_and_opencode_profiles() {
+        for kind in ["codex", "opencode"] {
+            let directory =
+                std::env::temp_dir().join(format!("installed-resume-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&directory).unwrap();
+            let mut state = opencode_result_state();
+            state.config.provider = kind.into();
+            state.config.driver = if kind == "codex" {
+                "codex_app_server"
+            } else {
+                "opencode_server"
+            }
+            .into();
+            state.config.cwd = directory.to_string_lossy().into();
+            state.config.runtime_ownership = Some("agent_home".into());
+            state.config.runtime_directory = Some(directory.clone());
+            state.config.opencode_permission_mode = Some("deny".into());
+            state.config.runtime_context = Some(
+                json!({"prompt": {"digest": "pinned"}, "instructions": {"entryPath": "AGENTS.md"}}),
+            );
+            state.active_provider_turn_id = None;
+            state.provider_process_generation = 1;
+            state.lifecycle = "prepared".into();
+            let mut executor = CodexCommandExecutor::new(&directory);
+            executor.event_identity = Some(ProviderEventIdentity {
+                runner_instance_id: "runner".into(),
+                run_id: "prior".into(),
+                normalized_session_id: "session".into(),
+                turn_id: "turn".into(),
+                item_id: "item".into(),
+            });
+            if kind == "opencode" {
+                let artifact = |name| crate::durable::QualifiedLaunchArtifact {
+                    path: directory.join(name),
+                    sha256: "a".repeat(64),
+                };
+                let profile = OpenCodeLaunchProfile {
+                    command: artifact("node"),
+                    proxy_script: artifact("proxy.cjs"),
+                    executable: artifact("opencode"),
+                };
+                state.config.command = profile.command.path.clone();
+                state.config.args = vec![profile.proxy_script.path.to_string_lossy().into()];
+                executor.opencode_launch_profile = Some(profile);
+                state.opencode_launch_profile_digest = executor
+                    .bind_opencode_launch_profile(&state.config)
+                    .unwrap();
+            }
+            executor.persist_state(&state).unwrap();
+            executor.restore().unwrap();
+            let mut config = state.config.clone();
+            config.instructions = "Edited installed instructions".into();
+            let mut payload = json!({"provider": config, "paperclipNextAuthority": {"identity": {"runId": "next", "normalizedSessionId": "session"}}});
+            for change in [
+                "model",
+                "permission",
+                "prompt",
+                "ownership",
+                "same_run",
+                "session",
+            ] {
+                let mut invalid = payload.clone();
+                match change {
+                    "model" => invalid["provider"]["model"] = json!("another/model"),
+                    "permission" => invalid["provider"]["opencodePermissionMode"] = json!("allow"),
+                    "prompt" => {
+                        invalid["provider"]["runtimeContext"]["prompt"]["digest"] = json!("changed")
+                    }
+                    "ownership" => invalid["provider"]["runtimeOwnership"] = Value::Null,
+                    "same_run" => {
+                        invalid["paperclipNextAuthority"]["identity"]["runId"] = json!("prior")
+                    }
+                    "session" => {
+                        invalid["paperclipNextAuthority"]["identity"]["normalizedSessionId"] =
+                            json!("other")
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(executor.attach_run(&invalid).is_err(), "{kind}: {change}");
+            }
+            executor.attach_run(&payload).unwrap();
+            assert_eq!(
+                executor.state.as_ref().unwrap().config.instructions,
+                "Edited installed instructions"
+            );
+            assert_eq!(executor.state.as_ref().unwrap().thread_id, state.thread_id);
+            assert!(executor.provider.is_none());
+            payload["provider"]["instructions"] = json!("Another edit");
+            executor.event_identity.as_mut().unwrap().run_id = "next".into();
+            assert!(executor.attach_run(&payload).is_err());
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     #[test]
@@ -5459,6 +5607,10 @@ mod tests {
     fn opencode_terminal_fallback_uses_its_actual_provider_identity() {
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "opencode".to_owned(),
                 driver: "opencode_server".to_owned(),
                 provider_version: "1.18.34".to_owned(),
@@ -5551,6 +5703,10 @@ mod tests {
             schema: PROVIDER_STATE_SCHEMA.to_owned(),
             lifecycle: "turn_active".to_owned(),
             config: CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
@@ -5605,6 +5761,10 @@ mod tests {
     fn recovered_active_turn_revokes_prior_completion_authority() {
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
@@ -5649,6 +5809,10 @@ mod tests {
     fn emits_a_structured_result_before_the_terminal_event() {
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
@@ -5742,6 +5906,10 @@ mod tests {
     fn receipt_limit_diagnostic_is_durable_and_turn_idempotent() {
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
@@ -5810,6 +5978,10 @@ mod tests {
     fn settled_receipt_limit_interrupt_cannot_be_marked_accepted() {
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
@@ -5861,6 +6033,10 @@ mod tests {
     fn regular_backlog_preserves_receipt_limit_and_terminal_settlement_capacity() {
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
@@ -5986,6 +6162,10 @@ mod tests {
 
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
@@ -6099,6 +6279,10 @@ mod tests {
 
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
@@ -6157,6 +6341,10 @@ mod tests {
     fn exact_regular_backlog_capacity_rejects_turn_admission() {
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
@@ -6300,6 +6488,10 @@ mod tests {
 
         let state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
@@ -6342,6 +6534,10 @@ mod tests {
     fn durable_provider_turn_ledger_backfills_legacy_completion_authority() {
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
@@ -6381,6 +6577,10 @@ mod tests {
     fn durable_provider_turn_ledger_never_evicts_within_an_epoch() {
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
@@ -6459,6 +6659,10 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
+                runtime_ownership: None,
+                runtime_context: None,
+                runtime_directory: None,
+                opencode_permission_mode: None,
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),

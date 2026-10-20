@@ -68,6 +68,7 @@ fn config(mode: &str) -> AcpxProviderSessionConfig {
         },
         system_instructions: "Complete the supplied task.".to_owned(),
         runtime_context: serde_json::Value::Null,
+        runtime_ownership: None,
         tool_set: tool_set(),
         expected_identity: None,
     }

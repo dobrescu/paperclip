@@ -152,7 +152,9 @@ pub(crate) fn next_authority_config(
         .ok_or_else(|| {
             DurableRunnerError::invalid("run.attach authority connection is required")
         })?;
+    let retain_connection = connection.get("mode").and_then(Value::as_str) == Some("retain");
     let connect_url = match connection.get("mode").and_then(Value::as_str) {
+        Some("retain") if connection.len() == 1 => current.connect_url.clone(),
         Some("connect") => connection
             .get("connectUrl")
             .and_then(Value::as_str)
@@ -184,11 +186,13 @@ pub(crate) fn next_authority_config(
     };
     let mut next = current.clone();
     next.connect_url = connect_url;
-    next.ca_bundle_path = connection
-        .get("caBundlePath")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(Into::into);
+    if !retain_connection {
+        next.ca_bundle_path = connection
+            .get("caBundlePath")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(Into::into);
+    }
     next.runner_instance_id = read_identity("runnerInstanceId")?;
     next.environment_lease_id = read_identity("environmentLeaseId")?;
     next.run_id = read_identity("runId")?;
@@ -236,10 +240,29 @@ fn apply_authority_rotation(
     rotated.reconnect_count = reconnect_count;
     rotated.diagnostics.append(&mut diagnostics);
     rotated.record_diagnostic("runner advanced to a new warm run authority");
+    let retain_endpoint = rotated.warm_transition.as_ref().is_some_and(|transition| {
+        transition
+            .receipt
+            .connection
+            .get("mode")
+            .and_then(Value::as_str)
+            == Some("retain")
+    });
+    if retain_endpoint
+        && (next.connect_url != config.connect_url || next.ca_bundle_path != config.ca_bundle_path)
+    {
+        return Err(DurableRunnerError::invalid(
+            "retained transport changed its endpoint",
+        ));
+    }
     store.save(&rotated)?;
     *state = rotated;
     *config = next;
-    endpoint.rotate(&config.connect_url, &config.run_id)
+    if retain_endpoint {
+        Ok(())
+    } else {
+        endpoint.rotate(&config.connect_url, &config.run_id)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1915,6 +1938,21 @@ fn process_command<E: CommandExecutor>(
                 && command.controller_seq > pending.controller_seq
                 && execution.result.get("providerExitConfirmed") == Some(&Value::Bool(true))
         });
+    if command.command_type == "runner.suspend"
+        && command.payload.get("includeStateReceipt") == Some(&Value::Bool(true))
+        && !matches!(
+            execution.result.get("status").and_then(Value::as_str),
+            Some("failed" | "rejected")
+        )
+    {
+        execution.result.as_object_mut().ok_or_else(|| DurableRunnerError::invalid("suspend result is not an object"))?
+            .insert("runnerState".into(), json!({
+                "schema": "paperclip.runner.durable.state.v1",
+                "runnerInstanceId": state.runner_instance_id, "environmentLeaseId": state.environment_lease_id,
+                "runId": state.run_id, "normalizedSessionId": state.normalized_session_id,
+                "turnId": state.turn_id, "itemId": state.item_id, "lifecycle": "suspended"
+            }));
+    }
     let result = state.complete_command(command, execution.result)?;
     if cleanup_proven {
         state.pending_provider_cleanup = None;
@@ -2483,6 +2521,28 @@ mod tests {
     }
 
     #[test]
+    fn requested_suspension_receipt_is_persisted_and_replayed_unchanged() {
+        let directory =
+            std::env::temp_dir().join(format!("runner-suspend-receipt-{}", uuid::Uuid::new_v4()));
+        let config = config(directory.clone());
+        let store = DurableStateStore::new(&directory).unwrap();
+        let (mut state, _) = store.load_or_create(&config).unwrap();
+        let mut suspend = command("runner.suspend");
+        suspend.payload = json!({"includeStateReceipt": true});
+        let mut executor = CountingExecutor { calls: 0 };
+        let (result, _) =
+            process_command(&mut state, &store, &config, &mut executor, &suspend).unwrap();
+        assert_eq!(result.result["runnerState"]["runnerInstanceId"], "runner_1");
+        assert_eq!(result.result["runnerState"]["lifecycle"], "suspended");
+        let (mut recovered, _) = store.load_or_create(&config).unwrap();
+        let (replayed, _) =
+            process_command(&mut recovered, &store, &config, &mut executor, &suspend).unwrap();
+        assert_eq!(replayed, result);
+        assert_eq!(executor.calls, 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn indeterminate_recovery_result_is_a_failed_wire_result() {
         let state = DurableState::new(&config(PathBuf::from("unused")));
         let result = StoredCommandResult {
@@ -2976,6 +3036,15 @@ mod tests {
             .expect("attachment should carry a new authority");
         assert_eq!(next.run_id, "run_2");
         assert_eq!(next.connect_url, "ws://127.0.0.1:3001/path");
+
+        let mut retained = attach.clone();
+        retained.payload["paperclipNextAuthority"]["connection"] = json!({"mode": "retain"});
+        let retained_config = next_authority_config(&retained, &current).unwrap().unwrap();
+        assert_eq!(retained_config.connect_url, current.connect_url);
+        assert_eq!(retained_config.ca_bundle_path, current.ca_bundle_path);
+        retained.payload["paperclipNextAuthority"]["connection"]["connectUrl"] =
+            json!("ws://forged.example.test");
+        assert!(next_authority_config(&retained, &current).is_err());
 
         let store = DurableStateStore::new(&directory).unwrap();
         let (mut state, _) = store.load_or_create(&current).unwrap();

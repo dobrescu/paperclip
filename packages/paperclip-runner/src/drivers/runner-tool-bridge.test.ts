@@ -38,6 +38,32 @@ async function rpc(
 }
 
 describe("runner semantic MCP bridge", () => {
+  it("preserves the compact assigned-tool catalog through provider aliases and dispatch", async () => {
+    const names = ["paperclip_search_assigned_tools", "paperclip_call_assigned_tool"];
+    const handler = vi.fn(async ({ tool: name }) => {
+      // Drivers normalize again before forwarding to Runner's exact-name authority.
+      if (!names.includes(canonicalRunnerToolName(name))) throw new Error("Tool is not authorized");
+      return { ok: true };
+    });
+    const bridge = await startRunnerToolBridge({
+      tools: names.map(name => ({ name, inputSchema: { type: "object" } })),
+      handler,
+    });
+    bridges.push(bridge);
+    const listed = await (await rpc(bridge, { id: "list", method: "tools/list" })).json();
+    expect(listed.result.tools.slice(0, 2).map((entry: { name: string }) => entry.name)).toEqual(names);
+    for (const name of names) {
+      for (const prefix of ["", "paperclip_", "paperclip__", "paperclip."]) {
+        const callId = `${prefix}:${name}`;
+        const result = await (await rpc(bridge, {
+          id: callId, method: "tools/call", params: { name: `${prefix}${name}`, arguments: {} },
+        })).json();
+        expect(result.result).toEqual({ content: [{ type: "text", text: '{"ok":true}' }] });
+        expect(handler).toHaveBeenLastCalledWith(expect.objectContaining({ tool: name, callId }));
+      }
+    }
+  });
+
   it.each([false, true])("preloads only essential public Claude task tools when opted in (%s)", async preloadClaudeTaskTools => {
     const bridge = await startRunnerToolBridge({
       preloadClaudeTaskTools,

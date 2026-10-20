@@ -94,6 +94,8 @@ const RESERVED_TOOLS: readonly RunnerToolDefinition[] = [
 
 export function canonicalRunnerToolName(name: string): string {
   const trimmed = name.trim();
+  // These Core catalog names include paperclip_ before the provider adds its namespace.
+  if (trimmed === "paperclip_search_assigned_tools" || trimmed === "paperclip_call_assigned_tool") return trimmed;
   if (trimmed === PRP_COMPLETION_TOOL_NAME || trimmed === PRP_BLOCK_TOOL_NAME) {
     return trimmed;
   }

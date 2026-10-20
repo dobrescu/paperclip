@@ -543,6 +543,7 @@ describe("native backend factory", () => {
     ["cursor", "../../test/fixtures/cursor-acp/profile-v7-identity.json"],
     ["cursor", "../../test/fixtures/cursor-acp/profile-v10-identity.json"],
     ["copilot", "../../test/fixtures/copilot-profile-v14-identity.json"],
+    ["copilot", "../../test/fixtures/copilot-profile-v18-identity.json"],
     ["pi", "../../test-fixtures/pi-acp/profile-v13-identity.json"],
     ["pi", "../../test-fixtures/pi-acp/profile-v14-identity.json"],
     ["pi", "../../test-fixtures/pi-acp/profile-v18-identity.json"],

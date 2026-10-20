@@ -1,3 +1,4 @@
+import { installedCodexCredentialSource } from "./codex-credentials.js";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createPiLaunchSpec } from "./pi-acp-runtime.js";
@@ -202,6 +203,26 @@ afterEach(async () => {
 });
 
 describe("ACPX runtime host", () => {
+  it("opens Codex with the installed account and leaves the source on the Runner", async () => {
+    const fixture = await hostFixture();
+    const installed = join(fixture.root, "installed-codex");
+    await mkdir(installed, { mode: 0o700 });
+    const auth = '{"tokens":{"access_token":"fixture-installed-account"}}';
+    await writeFile(join(installed, "auth.json"), auth, { mode: 0o600 });
+    let staged = "";
+    const host = await AcpxRuntimeHost.open({ ...fixture.options, agent: "codex", model: "gpt-5.6-sol",
+      runtimeOwnership: "agent_home", permissionMode: "approve-all", environment: {},
+      managedCodexCredentialSourcePath: installedCodexCredentialSource({ CODEX_HOME: installed }),
+    }, fixture.dependencies({ openRuntime: async launch => {
+      staged = join(launch.launchEnvironment.CODEX_HOME!, "auth.json");
+      expect(await readFile(staged, "utf8")).toBe(auth);
+      return runtimePort({ getStatus: async () => ({ models: { currentModelId: "gpt-5.6-sol" } }) });
+    } }));
+    await host.close({ reason: "installed account test" });
+    expect(await readFile(join(installed, "auth.json"), "utf8")).toBe(auth);
+    await expect(readFile(staged)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("rejects preconfigured Codex before admission resources or runtime launch", async () => {
     const fixture = await hostFixture();
     const openRuntime = vi.fn(), prepareSandbox = vi.fn();
@@ -1090,14 +1111,15 @@ describe("ACPX runtime host", () => {
     expect(fixture.commandClose).toHaveBeenCalledOnce();
   });
 
-  it.each(["cursor", "copilot", "pi"] as const)("binds %s agent files from each registered run copy, never ambient roots", async (agent) => {
+  it.each(["cursor", "copilot", "pi", "claude", "grok"] as const)("binds %s agent files from each registered run copy, never ambient roots", async (agent) => {
     const fixture = await hostFixture();
     const copies = await mkdtemp(join(tmpdir(), "paperclip-agent-copies-"));
     temporaryDirectories.push(copies);
     const model = agent === "pi" ? "openrouter/deepseek/deepseek-v4-flash-0731" : "explicit-test-model";
-    const options = { ...fixture.options, agent, model, ...(agent === "pi" ? { piThinkingLevel: "low" as const } : {}), permissionMode: "approve-all" as const,
+    const options = { ...fixture.options, agent, model,
+      ...(["claude", "grok"].includes(agent) ? { runtimeOwnership: "agent_home" as const } : {}), ...(agent === "pi" ? { piThinkingLevel: "low" as const } : {}), permissionMode: "approve-all" as const,
       providerPolicy: { readOnly: false }, environment: { AGENT_HOME: "/ambient/other-agent", PAPERCLIP_PI_AGENT_HOME: "/ambient/other-agent",
-        ...(agent === "pi" ? { OPENROUTER_API_KEY: "test" } : agent === "cursor" ? { CURSOR_API_KEY: "test" } : { COPILOT_GITHUB_TOKEN: "test" }),
+        ...(agent === "pi" ? { OPENROUTER_API_KEY: "test" } : agent === "cursor" ? { CURSOR_API_KEY: "test" } : agent === "claude" ? { ANTHROPIC_API_KEY: "test" } : agent === "grok" ? { XAI_API_KEY: "test" } : { COPILOT_GITHUB_TOKEN: "test" }),
       },
     };
     const opened: AcpxRuntimePortOpenOptions[] = [];

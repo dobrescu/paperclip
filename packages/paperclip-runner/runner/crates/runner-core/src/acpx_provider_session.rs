@@ -101,6 +101,7 @@ pub struct AcpxProviderSessionConfig {
     pub provider_policy: Option<AcpxProviderRuntimePolicy>,
     pub system_instructions: String,
     pub runtime_context: Value,
+    pub runtime_ownership: Option<String>,
     pub tool_set: AuthorizedToolSet,
     pub expected_identity: Option<AcpxProviderSessionIdentity>,
 }
@@ -1329,6 +1330,7 @@ fn session_open_params(config: &AcpxProviderSessionConfig, sidecar_tools: &[Valu
         "providerPolicy": config.provider_policy,
         "systemInstructions": config.system_instructions,
         "runtimeContext": config.runtime_context,
+        "runtimeOwnership": config.runtime_ownership,
         "tools": &sidecar_tools,
         "expectedIdentity": config.expected_identity,
     });
@@ -1783,6 +1785,7 @@ mod mode_tests {
             provider_policy: Some(AcpxProviderRuntimePolicy { read_only: false }),
             system_instructions: String::new(),
             runtime_context: Value::Null,
+            runtime_ownership: None,
             tool_set: AuthorizedToolSet {
                 schema: TOOL_SET_SCHEMA.to_owned(),
                 schema_version: 1,

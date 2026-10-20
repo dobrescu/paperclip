@@ -98,6 +98,7 @@ await writeFile(
   JSON.stringify({
     keys: Object.keys(process.env).sort(),
     home: process.env.HOME,
+    agentHome: process.env.AGENT_HOME,
     configHome: process.env.XDG_CONFIG_HOME,
     projectConfigDisabled: process.env.OPENCODE_DISABLE_PROJECT_CONFIG,
     modelsFetchDisabled: process.env.OPENCODE_DISABLE_MODELS_FETCH,

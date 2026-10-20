@@ -246,6 +246,7 @@ export interface OpenAcpxRuntimeHostOptions {
   claudeEffort?: "low" | "medium" | "high" | "xhigh" | "max";
   systemInstructions?: string;
   runtimeContext?: NativeRuntimeContextSnapshot | null;
+  runtimeOwnership?: "agent_home";
   environment?: NodeJS.ProcessEnv;
   managedCodexCredentialSourcePath?: string;
   expectedIdentity?: AcpxExpectedSessionIdentity;
@@ -516,7 +517,7 @@ export class AcpxRuntimeHost {
       // agent and run. Environment/config values cannot widen the grant. Each
       // resumed process receives the newly registered copy; collection already
       // requires verified provider shutdown in the native executor.
-      const agentFiles = ["cursor", "copilot", "pi"].includes(options.agent)
+      const agentFiles = options.runtimeOwnership === "agent_home" || ["cursor", "copilot", "pi"].includes(options.agent)
         ? bindAcpxAgentFiles(options.runtimeContext, [sandbox.root,
           ...(installation.agentServerPackageJsonPath === null ? [] : [dirname(installation.agentServerPackageJsonPath)]),
         ]) : null;

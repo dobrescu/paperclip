@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
 import type { ControlPlanePort } from "../contracts/control-plane-port.js";
+import { QUALIFIED_ACPX_PROFILES } from "../drivers/acpx/qualified-profiles.js";
 import type { NativeExecutionInputV1 } from "../contracts/native-execution.js";
 import type {
   NativeSession,
@@ -140,6 +141,33 @@ async function expectTurnStarted(
     "provider turn did not start within the bounded notification prefix",
   );
 }
+
+it("authenticates a provider-owned Runner artifact without reading a controller binary", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runnerd-external-artifact-"));
+  const binary = defaultCapabilityRunnerdBinary();
+  const artifact = readRunnerdArtifactBinding(binary);
+  const launch = vi.fn((spec: durableControlPlane.RunnerProcessLaunchSpec) => {
+    expect(spec.command).toBe("/provider/pinned-runner");
+    expect(spec.nativeRunner).toMatchObject({ runnerVersion: artifact.version, runnerDigest: artifact.digest });
+    const child = spawn(binary, [...spec.args], { cwd: spec.cwd, env: spec.environment, stdio: "ignore" });
+    const completion = new Promise<durableControlPlane.RunnerProcessResult>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code, signal) => resolve({ code, signal, stdout: "", stderr: "" }));
+    });
+    return { child, completion };
+  });
+  const bundle = createCapabilityRunnerdCodexTransport({ runnerBinary: "/provider/pinned-runner", runnerArtifact: artifact,
+    runnerProcessLauncher: launch, codexCommand: fakeCodex, codexArgs: fakeCodexArgs(root), stateDirectory: root,
+    lifecyclePolicy: { mode: "per_turn", idleTimeoutMs: null } });
+  try {
+    const opened = await bundle.transport.request("thread/start", { cwd: root, dynamicTools: [] });
+    expect(opened).toBeTruthy();
+    expect(launch).toHaveBeenCalledOnce();
+    await bundle.transport.close();
+    const state = JSON.parse(await readFile(join(root, "runner/runner-state.json"), "utf8"));
+    expect(state.lifecycle).toBe("suspended");
+  } finally { await bundle.transport.close().catch(() => {}); await rm(root, { recursive: true, force: true }); }
+});
 
 it("replaces an owned v1 runner with fresh v2 authorization before warm attachment", async () => {
   const directory = await mkdtemp(join(tmpdir(), "runnerd-v1-v2-replacement-"));
@@ -3353,6 +3381,32 @@ it("does not certify probe cleanup while owned credential preparation is unconfi
     await rm(root, { recursive: true, force: true });
   }
 }, 15_000);
+
+it("expires an unconnected setup Runner through its supported runtime flag", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runnerd-probe-expiry-"));
+  const server = createServer(); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  await new Promise<void>(resolve => server.close(() => resolve()));
+  const runId = `probe-${randomUUID()}`;
+  const binary = defaultCapabilityRunnerdBinary();
+  const artifact = readRunnerdArtifactBinding(binary);
+  const handle = durableControlPlane.spawnRunner({ runnerBinaryPath: binary, runnerVersion: artifact.version, runnerDigest: artifact.digest,
+    stateDirectory: join(root, "runner"), ticket: "synthetic-probe-ticket",
+    identity: { runnerInstanceId: "probe-runner", environmentLeaseId: "probe-lease", runId, normalizedSessionId: "probe-session", turnId: "probe-turn", itemId: "probe-item" },
+    connection: { mode: "listen", listenAddress: "0.0.0.0", listenPort: port, listenPath: `/api/runner/v1/connect/${runId}` },
+    maxOutboxBytes: 262144, p0ReserveBytes: 65536, maxRuntimeMs: 250,
+    lifecyclePolicy: { mode: "per_turn", idleTimeoutMs: null },
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([handle.completion, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Unconnected probe ignored its runtime deadline")), 5000);
+    })]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/deadline.*elapsed|deadline.*exceeded/);
+    expect(await readFile(join(root, "runner/runner-state.json"), "utf8")).toContain("deadline");
+  } finally { clearTimeout(timer); handle.child.kill("SIGKILL"); await handle.completion.catch(() => {}); await rm(root, { recursive: true, force: true }); }
+}, 10_000);
 
 it.each(["complete", "api-key", "default-model", "mismatched-model", "model-refresh-error", "model-cleanup-error", "missing-model", "missing-runtime", "missing-completion", "late-bootstrap", "remote-complete", "remote-mismatched-model", "late-remote-preparation", "late-remote-release-error"] as const)("native Codex setup requires its daemon/app-server hello (%s)", async mode => {
   const root = await mkdtemp(join(tmpdir(), "runnerd-native-setup-"));
@@ -7172,6 +7226,36 @@ it("rotates PRP authority in place for a warm cross-run attachment", async () =>
   }
 }, 30_000);
 
+it("verifies ACPX setup using its authenticated effective model and a read-only hello", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runnerd-pi-setup-"));
+  const providerNode = process.platform === "linux" ? join(root, "node") : process.execPath;
+  if (process.platform === "linux") {
+    await cp(process.execPath, providerNode, { dereference: true }); await chmod(providerNode, 0o500);
+  }
+  const cliRoot = join(root, "dist/cli"); await mkdir(cliRoot, { recursive: true, mode: 0o700 });
+  const sidecar = join(cliRoot, "acpx-runtime-sidecar.cjs");
+  const fixture = await readFile(fileURLToPath(new URL("./fixtures/fake-pi-warm-sidecar.cjs", import.meta.url)), "utf8");
+  const start = fixture.indexOf('  if (command === "turn.start") event("runtime.tool_called", {');
+  const end = fixture.indexOf('  if (command === "tool.resolve")', start);
+  expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+  const hello = fixture.slice(0, start) + `  if (command === "turn.start") {
+    event("runtime.event", { type: "text_delta", text: "hello" });
+    event("runtime.turn_terminal", { status: "completed" });
+  }\n` + fixture.slice(end);
+  await writeFile(sidecar, hello.replace("/* fixture-config */ null", JSON.stringify({ journal: join(root, "commands.ndjson"),
+    resumeDelayMs: 0, commandDigest: QUALIFIED_ACPX_PROFILES.pi.commandDigest })), { mode: 0o600 });
+  const digest = (path: string) => `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+  const workspace = join(root, "workspace"); await mkdir(workspace);
+  try {
+    await expect(probeNativeRunnerEnvironment({ runtimeDirectory: root, provider: "acpx",
+      model: "openrouter/deepseek/deepseek-v4-flash-0731", workingDirectory: workspace, environment: { PATH: "/usr/bin:/bin" },
+      transportOptions: { acpxAgent: "pi", piThinkingLevel: "low", acpxPermissionMode: "deny-all", runnerFilesystemRoot: root,
+        runnerBinary: defaultCapabilityRunnerdBinary(), providerNodeCommand: providerNode, providerNodeCommandSha256: digest(providerNode),
+        acpxSidecarPath: sidecar, acpxSidecarSha256: digest(sidecar), providerPackAuthorityDigest: `sha256:${"d".repeat(64)}` },
+    })).resolves.toMatchObject({ provider: "acpx", providerDriver: "acpx_runtime", effectiveModel: "openrouter/deepseek/deepseek-v4-flash-0731", helloProbePassed: true });
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
 it("waits for a warm runner to re-authenticate before probing attachment readiness", async () => {
   const stateDirectory = await mkdtemp(
     join(tmpdir(), "runnerd-warm-reattach-before-probe-"),
@@ -7948,6 +8032,7 @@ it("cold-restores a suspended provider session under its durable run binding", a
       cwd: tmpdir(),
     });
     expect(externalRotationSteps).toEqual(["archived"]);
+    expect((await readRunnerState()).environmentLeaseId).toBe(externalIdentity.environmentLeaseId);
   } finally {
     await externallyRotated.transport.close();
   }
@@ -8534,6 +8619,8 @@ it("resolves explicit skills to the remote provider home and rejects unassigned 
     { type: "skill", name: "assigned", path: "/runner/codex-home/skills/assigned/SKILL.md" },
   ]);
   expect(resolveRunnerdCodexSkillInputs([], context, "/runner/codex-home")).toEqual([]);
+  expect(resolveRunnerdCodexSkillInputs([skill], context, "unused", { assigned: "V:\\skills\\entry.md" })[0].path).toBe("V:\\skills\\entry.md");
+  expect(() => resolveRunnerdCodexSkillInputs([skill], context, "unused", {})).toThrow("omitted the assigned skill");
   for (const inputs of [[{ ...skill, path: "/arbitrary/SKILL.md" }], [{ ...skill, name: "other" }], [skill, skill]]) {
     expect(() => resolveRunnerdCodexSkillInputs(inputs, context, "/runner/codex-home")).toThrow("unique assigned runtime skill");
   }
@@ -8627,7 +8714,8 @@ it.each([true, false])("preserves prepared OpenCode cleanup errors (primary fail
 it.each([
   { model: "openrouter/deepseek/deepseek-v4-flash-0731", supportsReasoning: true },
   { model: "anthropic/claude-sonnet-4", supportsReasoning: false },
-])("preserves prepared input and completion feedback through runnerd and the real OpenCode proxy boundary ($model)", async ({ model, supportsReasoning }) => {
+  { model: "openrouter/deepseek/deepseek-v4-flash-0731", supportsReasoning: true, readOnly: true },
+])("preserves prepared input and completion feedback through runnerd and the real OpenCode proxy boundary ($model, read-only: $readOnly)", async ({ model, supportsReasoning, readOnly = false }) => {
   const root = await mkdtemp(join(tmpdir(), "runnerd-prepared-opencode-"));
   // GitHub-hosted Linux toolcache Node can be group-writable, unlike the AWS
   // fleet. Qualify an owned copy with strict permissions, never chmod the host
@@ -8682,6 +8770,7 @@ it.each([
   const driver = new CodexAppServerDriver({
     taskEnvelope: task,
     conversationMode: "prepared",
+    ...(readOnly ? { requestedCollaborationMode: "plan" as const } : {}),
     model,
     transportFactory: () => bundle.transport,
     workingDirectoryAuthority: "remote_runner",
@@ -8715,6 +8804,10 @@ it.each([
         events.push(event);
         if (event.eventType === "turn.completed") break;
       }
+      if (readOnly) expect(events.find(event => event.eventType === "session.started")).toMatchObject({
+        payload: { context: { sandbox: { permissionProfile: { id: "paperclip-runner-workspace-read-only" } } } },
+      });
+      expect(events.find(event => event.eventType === "session.started")).toMatchObject({ payload: { context: { model } } });
       expect(completionCalls).toBe(2);
       expect(events.filter(event => event.eventType === "run.result.proposed")).toHaveLength(1);
       const sessionRoots = (await readdir(runtime, { withFileTypes: true })).filter((entry) => entry.isDirectory());

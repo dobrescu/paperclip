@@ -363,6 +363,14 @@ pub struct CodexProviderConfig {
     pub provider_session_id: Option<String>,
     #[serde(default)]
     pub instructions: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_ownership: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_context: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_directory: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_permission_mode: Option<String>,
     #[serde(default = "default_approval_policy")]
     pub approval_policy: String,
     #[serde(default)]
@@ -425,6 +433,27 @@ impl CodexProviderConfig {
     }
 
     pub fn validate(&self) -> Result<(), LocalRunnerError> {
+        if !matches!(self.runtime_ownership.as_deref(), None | Some("agent_home"))
+            || !matches!(
+                self.opencode_permission_mode.as_deref(),
+                None | Some("allow" | "ask" | "deny")
+            )
+            || self
+                .runtime_context
+                .as_ref()
+                .is_some_and(|value| !value.is_null() && !value.is_object())
+            || self
+                .runtime_directory
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute())
+            || (self.provider == "opencode"
+                && self.runtime_ownership.as_deref() == Some("agent_home")
+                && (self.opencode_permission_mode.is_none() || self.runtime_directory.is_none()))
+        {
+            return Err(LocalRunnerError::invalid(
+                "invalid installed provider runtime",
+            ));
+        }
         if !matches!(
             self.conversation_mode.as_deref(),
             None | Some("task" | "prepared")
@@ -1130,6 +1159,18 @@ impl CodexProvider {
                 params_object.insert("permissions".to_owned(), json!(provider.permission_profile));
             }
             if config.provider == "opencode" {
+                if config.runtime_ownership.as_deref() == Some("agent_home") {
+                    params_object.insert(
+                        "permissionMode".to_owned(),
+                        json!(config.opencode_permission_mode),
+                    );
+                    params_object
+                        .insert("runtimeContext".to_owned(), json!(config.runtime_context));
+                    params_object.insert(
+                        "runtimeDirectory".to_owned(),
+                        json!(config.runtime_directory),
+                    );
+                }
                 if let Some(mode) = &config.conversation_mode {
                     params_object.insert("conversationMode".to_owned(), json!(mode));
                 }
@@ -4190,6 +4231,10 @@ while IFS= read -r line; do
 done
 "#;
         let config = CodexProviderConfig {
+            runtime_ownership: None,
+            runtime_context: None,
+            runtime_directory: None,
+            opencode_permission_mode: None,
             provider: "codex".to_owned(),
             driver: "codex_app_server".to_owned(),
             provider_version: "reader-tail-fixture".to_owned(),
@@ -4581,6 +4626,10 @@ done
     #[cfg(unix)]
     fn startup_observer_failure_reaps_the_exact_child_before_any_initialization_rpc() {
         let config = CodexProviderConfig {
+            runtime_ownership: None,
+            runtime_context: None,
+            runtime_directory: None,
+            opencode_permission_mode: None,
             provider: "codex".to_owned(),
             driver: "codex_app_server".to_owned(),
             provider_version: "fixture".to_owned(),
@@ -4702,6 +4751,10 @@ done
     #[test]
     fn admits_only_exact_local_facade_provider_driver_pairs() {
         let mut config = CodexProviderConfig {
+            runtime_ownership: None,
+            runtime_context: None,
+            runtime_directory: None,
+            opencode_permission_mode: None,
             provider: "opencode".to_owned(),
             driver: "opencode_server".to_owned(),
             provider_version: QUALIFIED_OPENCODE_VERSION.to_owned(),

@@ -1,3 +1,4 @@
+import { canonicalNativeRuntimeContextDigest, NATIVE_RUNTIME_ASSET_SCHEMA, nativeRuntimePromptDigest, PAPERCLIP_EXECUTION_PROMPT, PAPERCLIP_EXECUTION_PROMPT_REVISION } from "../contracts/runtime-context.js";
 import { describe, expect, it } from "vitest";
 
 import { enqueueOpenCodeProxyInput } from "./opencode-proxy-input.js";
@@ -60,7 +61,7 @@ describe("OpenCode proxy input sequencing", () => {
 
 it.each([true, false])("settles a real proxy interrupt with controller feedback or EOF (feedback: %s)", async respond => {
   const { execFileSync, spawn } = await import("node:child_process");
-  const { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } = await import("node:fs/promises");
+  const { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } = await import("node:fs/promises");
   const { closeSync, openSync } = await import("node:fs");
   const { randomUUID } = await import("node:crypto");
   const { tmpdir } = await import("node:os");
@@ -82,8 +83,23 @@ it.each([true, false])("settles a real proxy interrupt with controller feedback 
   await writeFile(proxy, execFileSync(process.execPath, ["--input-type=module", "-e", `import { bundleVerifiedProviderEntrypoints } from "./scripts/build-verified-provider-entrypoints.mjs"; const entries = await bundleVerifiedProviderEntrypoints({ write: false }); process.stdout.write(entries.find(({ entrypoint }) => entrypoint.name === "opencode-app-server-proxy").verifiedResult.outputFiles[0].contents);`], { maxBuffer: 16 * 1024 * 1024 }));
   const fd = process.platform === "linux" ? openSync(executable, "r") : undefined;
   const runtime = join(root, "runtime");
+  const agentHome = join(root, "installed-agent");
+  const skillRoot = join(agentHome, "skills/assigned");
+  await mkdir(skillRoot, { recursive: true });
+  await writeFile(join(agentHome, "AGENTS.md"), "Installed instructions");
+  await writeFile(join(skillRoot, "SKILL.md"), "# Assigned skill");
+  const digest = "0".repeat(64);
+  const bundle = (rootPath: string) => ({ schema: NATIVE_RUNTIME_ASSET_SCHEMA, digest, manifestDigest: digest, rootPath, fileCount: 1, totalBytes: 1 });
+  const context = {
+    prompt: { revision: PAPERCLIP_EXECUTION_PROMPT_REVISION, text: PAPERCLIP_EXECUTION_PROMPT, digest: nativeRuntimePromptDigest() },
+    instructions: { entryPath: "AGENTS.md", bundle: bundle(agentHome), workingCopy: { kind: "agent_files" as const, rootPath: agentHome, entryPath: "AGENTS.md" } },
+    skills: [{ key: "company/assigned", runtimeName: "assigned", versionId: "v1", bundle: bundle(skillRoot) }],
+    mcp: { assignmentSetId: "assigned", digest, bindingId: null },
+  };
+  const runtimeContext = { ...context, aggregateDigest: canonicalNativeRuntimeContextDigest(context) };
+  const permissionMode = respond ? "deny" : "ask";
   const child = spawn(process.execPath, [proxy, "--paperclip-trusted-opencode-executable", fd === undefined ? executable : "/proc/self/fd/3"], {
-    env: { ...process.env, PAPERCLIP_OPENCODE_RUNTIME_DIR: runtime, OPENROUTER_API_KEY: "fixture-key" },
+    env: { ...process.env, PAPERCLIP_OPENCODE_RUNTIME_DIR: undefined, PAPERCLIP_OPENCODE_PERMISSION_MODE: "allow", PAPERCLIP_NATIVE_RUNTIME_CONTEXT_PATH: "/must-not-read-controller-context", OPENROUTER_API_KEY: "fixture-key" },
     stdio: fd === undefined ? ["pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe", fd],
     detached: process.platform !== "win32",
   });
@@ -104,8 +120,15 @@ it.each([true, false])("settles a real proxy interrupt with controller feedback 
   try {
     send({ id: 1, method: "initialize", params: {} });
     await response(1);
-    send({ id: 2, method: "thread/start", params: { cwd: root, model: "openrouter/deepseek/deepseek-v4-flash-0731", completionContract: { revision: "proxy-v1", criterionIds: ["objective"] }, conversationMode: "prepared" } });
+    send({ id: 2, method: "thread/start", params: { cwd: root, runtimeDirectory: runtime, runtimeContext, permissionMode, model: "openrouter/deepseek/deepseek-v4-flash-0731", completionContract: { revision: "proxy-v1", criterionIds: ["objective"] }, conversationMode: "prepared" } });
     await response(2);
+    const sessionDirectory = join(runtime, (await readdir(runtime, { withFileTypes: true })).find(entry => entry.isDirectory())!.name);
+    const config = JSON.parse(await readFile(join(sessionDirectory, "config/opencode/opencode.json"), "utf8"));
+    expect(config.permission["*"]).toBe(permissionMode);
+    const homes = (await readdir(sessionDirectory)).filter(name => name.startsWith("home-"));
+    expect(await readFile(join(sessionDirectory, homes[0]!, ".claude/skills/assigned/SKILL.md"), "utf8")).toBe("# Assigned skill");
+    const providerEnvironment = JSON.parse(await readFile(join(sessionDirectory, "data/fake-environment.json"), "utf8"));
+    expect(providerEnvironment.agentHome).toBe(await realpath(agentHome));
     send({ id: 3, method: "turn/start", params: { input: [{ type: "text", text: JSON.stringify({ schema: "paperclip.native-model-envelope.v3", task: { prompt: "invalid-tool-feedback completion-feedback" }, completionContract: { revision: "proxy-v1", criteria: [{ id: "objective", requirement: "Complete the fixture." }] } }) }] } });
     await response(3);
     await expect.poll(() => messages.find(message => message.method === "item/tool/call"), { timeout: 5_000 }).toBeDefined();
@@ -145,6 +168,9 @@ it.each([true, false])("settles a real proxy interrupt with controller feedback 
       await exit;
     }
     input.close();
+    for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
+      if (entry.isDirectory()) await chmod(join(entry.parentPath, entry.name), 0o700);
+    }
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000);

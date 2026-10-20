@@ -8,6 +8,8 @@ import type { DurableRecoveryIdentity } from "../contracts/durable-recovery.js";
  * not a serializable plugin API.
  */
 export interface RunnerExecutionDriver {
+  /** The process owner supplies a persistent agent home and installed provider runtime. */
+  persistentAgentHome?: boolean;
   /** Prepare resources and register or acquire the connection before launch. */
   controlPlaneRegistration?: (
     authority: DurablePrpControlPlane,
@@ -25,7 +27,7 @@ export interface RunnerExecutionDriver {
       | "runner_ingress_unavailable";
     /** Persists only exact, independently verified suspended remote state. */
     checkpoint?: (settlement: "settled" | "unsettled") => Promise<void> | void;
-    release: () => Promise<void> | void;
+    release: (reason?: "detach") => Promise<void> | void;
   }>;
   /** Override process ownership; omission uses the SDK's local process owner. */
   runnerProcessLauncher?: (

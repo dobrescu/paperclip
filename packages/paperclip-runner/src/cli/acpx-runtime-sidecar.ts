@@ -5,6 +5,7 @@ import { parseProviderMode } from "../contracts/provider-mode.js";
 import { acpxProfileActivity, type AcpxActivityAdapter, type AcpxToolEvidence } from "../drivers/acpx/profile-activity.js";
 
 import { resolvePiThinkingLevel } from "../drivers/acpx/pi-thinking.js";
+import { installedCodexCredentialSource } from "../drivers/acpx/codex-credentials.js";
 import { createHash, randomUUID } from "node:crypto";
 import { resolveCompletionContinuation } from "../drivers/completion-continuation.js";
 import { createInterface } from "node:readline";
@@ -305,6 +306,10 @@ async function dispatch(
         providerPolicy: params.providerPolicy,
         systemInstructions: params.systemInstructions,
         runtimeContext: params.runtimeContext,
+        runtimeOwnership: params.runtimeOwnership,
+        ...(params.runtimeOwnership === "agent_home" && params.agent === "codex" ? {
+          managedCodexCredentialSourcePath: installedCodexCredentialSource(process.env),
+        } : {}),
         environment: createAcpxSidecarHostEnvironment(process.env, params.agent, params.normalizedSessionId),
         expectedIdentity: params.expectedIdentity,
         semanticTools: {
@@ -1227,8 +1232,11 @@ function safeOutput(value: unknown): Record<string, unknown> {
 function parseOpenParams(
   value: Record<string, unknown>,
 ): AcpxSidecarOpenParams {
-  const fields = new Set(["runtimeDirectory", "normalizedSessionId", "workingDirectory", "agent", "model", "permissionMode", "mode", "piThinkingLevel", "claudeEffort", "permissionModePinned", "providerPolicy", "systemInstructions", "runtimeContext", "tools", "providerSessionKey", "expectedIdentity"]);
+  const fields = new Set(["runtimeDirectory", "normalizedSessionId", "workingDirectory", "agent", "model", "permissionMode", "mode", "piThinkingLevel", "claudeEffort", "permissionModePinned", "providerPolicy", "systemInstructions", "runtimeContext", "runtimeOwnership", "tools", "providerSessionKey", "expectedIdentity"]);
   if (Object.keys(value).some(key => !fields.has(key))) throw new Error("ACPX open parameters include an unsupported field");
+  if (value.runtimeOwnership != null && value.runtimeOwnership !== "agent_home") {
+    throw new Error("unsupported ACPX runtime ownership");
+  }
   const agent = requireQualifiedAgent(value.agent);
   const model = requiredText(value.model, "model");
   if (value.mode !== undefined && agent !== "cursor") throw new Error("mode is supported only for Cursor");
@@ -1263,6 +1271,7 @@ function parseOpenParams(
       "systemInstructions",
       1024 * 1024,
     ),
+    ...(value.runtimeOwnership === "agent_home" ? { runtimeOwnership: "agent_home" as const } : {}),
     runtimeContext: value.runtimeContext == null
       ? null
       : parseNativeRuntimeContext(value.runtimeContext),

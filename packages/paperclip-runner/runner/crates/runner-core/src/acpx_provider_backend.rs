@@ -150,12 +150,14 @@ struct AcpxProviderDescriptor {
     provider_policy: Option<AcpxProviderRuntimePolicy>,
     #[serde(default)]
     runtime_context: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_ownership: Option<String>,
 }
 
 // Only controller-authenticated run grants move between provider lifetimes.
 // Keep prompt, bundle/skill identities, assignment policy, and unknown fields
 // in this comparison; a new filesystem copy is not a new provider profile.
-fn runtime_context_session_identity(context: &Value) -> Option<Value> {
+pub(crate) fn runtime_context_session_identity(context: &Value) -> Option<Value> {
     let mut identity = context.clone();
     for pointer in [
         "/instructions/bundle/rootPath",
@@ -262,6 +264,10 @@ impl AcpxProviderDescriptor {
         })?;
         if self.kind != "acpx"
             || self.provider != "acpx"
+            || self
+                .runtime_ownership
+                .as_deref()
+                .is_some_and(|owner| owner != "agent_home")
             || self.driver != ACPX_DRIVER_KIND
             || self.provider_version != QUALIFIED_ACPX_VERSION
             || self.acpx_version != QUALIFIED_ACPX_VERSION
@@ -379,6 +385,7 @@ impl AcpxProviderDescriptor {
             provider_policy: self.provider_policy.clone(),
             system_instructions: self.instructions.clone(),
             runtime_context: self.runtime_context.clone(),
+            runtime_ownership: self.runtime_ownership.clone(),
             tool_set: provider_tool_set,
             expected_identity,
         })
@@ -1204,7 +1211,10 @@ impl AcpxCommandExecutor {
                 .is_some_and(|(current, prior)| current == prior);
             let grants_changed = descriptor.instructions != state.descriptor.instructions
                 || descriptor.runtime_context != state.descriptor.runtime_context;
+            // Runner resolves agent-home text from the installed file for each authenticated run.
             let text_compatible = attachment_policy == RunAttachmentPolicy::AuthenticatedRunGrants
+                || (descriptor.runtime_ownership.as_deref() == Some("agent_home")
+                    && state.descriptor.runtime_ownership.as_deref() == Some("agent_home"))
                 || only_registered_asset_text_changed(&descriptor, &state.descriptor);
             if !compatible
                 || !text_compatible
@@ -3754,17 +3764,23 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cursor_attachment_rotates_only_authenticated_run_grants() {
-        authenticated_run_grant_attachment("cursor");
+        authenticated_run_grant_attachment("cursor", false);
     }
 
     #[cfg(unix)]
     #[test]
     fn claude_attachment_rotates_only_authenticated_asset_paths() {
-        authenticated_run_grant_attachment("claude");
+        authenticated_run_grant_attachment("claude", false);
     }
 
     #[cfg(unix)]
-    fn authenticated_run_grant_attachment(agent: &str) {
+    #[test]
+    fn claude_agent_home_attachment_loads_instruction_edits_into_the_same_session() {
+        authenticated_run_grant_attachment("claude", true);
+    }
+
+    #[cfg(unix)]
+    fn authenticated_run_grant_attachment(agent: &str, persistent_home: bool) {
         let directory = temporary_directory(&format!("{agent}-cross-run-attach"));
         let runtime = directory.join("runtime");
         let workspace = directory.join("workspace");
@@ -3792,7 +3808,11 @@ mod tests {
         descriptor_value["runtimeDirectory"] = json!(runtime);
         descriptor_value["cwd"] = json!(workspace);
         let prior_root = directory.join("old-registered-copy");
-        let current_root = directory.join("new-registered-copy");
+        let current_root = if persistent_home {
+            prior_root.clone()
+        } else {
+            directory.join("new-registered-copy")
+        };
         fs::create_dir_all(&prior_root).unwrap();
         fs::create_dir_all(&current_root).unwrap();
         descriptor_value["instructions"] = json!(format!(
@@ -3811,11 +3831,42 @@ mod tests {
             "mcp": {"assignmentSetId": "assignment-1", "digest": "e".repeat(64), "bindingId": "old-run-binding"},
             "futurePolicy": {"companyId": "company-1"},
         });
-        if agent == "claude" {
+        if agent == "claude" && !persistent_home {
             descriptor_value["instructions"] = json!(format!(
                 "Pinned prompt. Custom entry mentioning /old-bundle.\n\n{}",
                 registered_asset_suffix(&descriptor_value["runtimeContext"]).unwrap()
             ));
+        }
+        let resolve_installed = |mut value: Value| {
+            for key in ["sidecarCommand", "sidecarArgs", "runtimeDirectory", "cwd"] {
+                value.as_object_mut().unwrap().remove(key);
+            }
+            value["runtimeOwnership"] = json!("agent_home");
+            value["instructions"] = json!("Pinned prompt.");
+            value["runtimeContext"]["skills"] = json!([]);
+            let command = Command {
+                schema: "paperclip.prp.command.v3".into(),
+                command_id: "installed".into(),
+                controller_seq: 1,
+                command_type: "run.attach".into(),
+                issued_at: "2026-01-01T00:00:00Z".into(),
+                deadline_at: None,
+                precondition: None,
+                payload: json!({"provider": value}),
+            };
+            crate::persistent_agent_runtime::resolve(
+                &command,
+                &test_config(&directory, Some(launch_profile.clone())),
+                &prior_root.canonicalize().unwrap(),
+                &workspace.canonicalize().unwrap(),
+            )
+            .unwrap()
+            .payload["provider"]
+                .clone()
+        };
+        if persistent_home {
+            fs::write(prior_root.join("AGENTS.md"), "Original persistent entry").unwrap();
+            descriptor_value = resolve_installed(descriptor_value);
         }
         let original_descriptor: AcpxProviderDescriptor =
             serde_json::from_value(descriptor_value.clone()).unwrap();
@@ -3935,7 +3986,9 @@ mod tests {
             .contains("requires run.attach before commands from a new run"));
 
         descriptor_value["runId"] = json!("run-2");
-        fs::remove_dir_all(&prior_root).unwrap();
+        if !persistent_home {
+            fs::remove_dir_all(&prior_root).unwrap();
+        }
         descriptor_value["instructions"] = json!(format!(
             "Current AGENT_HOME: {}. Fresh custom entry.",
             current_root.display()
@@ -3944,9 +3997,12 @@ mod tests {
             json!(current_root);
         descriptor_value["runtimeContext"]["instructions"]["bundle"]["rootPath"] =
             json!("/new-bundle");
-        descriptor_value["runtimeContext"]["skills"][0]["bundle"]["rootPath"] = json!("/new-skill");
+        if !persistent_home {
+            descriptor_value["runtimeContext"]["skills"][0]["bundle"]["rootPath"] =
+                json!("/new-skill");
+        }
         descriptor_value["runtimeContext"]["mcp"]["bindingId"] = json!("new-run-binding");
-        if agent == "claude" {
+        if agent == "claude" && !persistent_home {
             descriptor_value["instructions"] = json!(format!(
                 "Pinned prompt. Custom entry mentioning /old-bundle.\n\n{}",
                 registered_asset_suffix(&descriptor_value["runtimeContext"]).unwrap()
@@ -3992,11 +4048,36 @@ mod tests {
                 );
             }
         }
+        if persistent_home {
+            fs::write(prior_root.join("AGENTS.md"), "Edited persistent entry").unwrap();
+            descriptor_value = resolve_installed(descriptor_value);
+            assert!(descriptor_value["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Edited persistent entry"));
+            let mut removed_ownership = descriptor_value.clone();
+            removed_ownership
+                .as_object_mut()
+                .unwrap()
+                .remove("runtimeOwnership");
+            assert!(attached
+                .attach_run(&json!({"provider": removed_ownership}))
+                .is_err());
+            let mut changed_policy = descriptor_value.clone();
+            changed_policy["runtimeContext"]["prompt"]["digest"] = json!("changed");
+            assert!(attached
+                .attach_run(&json!({"provider": changed_policy}))
+                .is_err());
+        }
         attached
             .attach_run(&json!({"provider": descriptor_value}))
             .unwrap();
         assert_eq!(attached.state.as_ref().unwrap().descriptor.run_id, "run-2");
         assert!(!marker.exists());
+        assert_eq!(
+            attached.state.as_ref().unwrap().identity,
+            original.state.as_ref().unwrap().identity
+        );
         let refreshed = &attached.state.as_ref().unwrap().descriptor;
         assert_eq!(
             refreshed.runtime_context,

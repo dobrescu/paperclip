@@ -10,6 +10,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
+import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { verifiedRuntimeExecutableHandoff } from "./verified-runtime-executable.js";
@@ -173,6 +174,12 @@ export async function acquireAcpxProviderLifetimeLease(input: {
       }
     },
   });
+}
+
+/** Runner-local account selection; explicit keys keep their existing precedence. */
+export function installedCodexCredentialSource(environment: NodeJS.ProcessEnv): string | undefined {
+  if (environment.CODEX_API_KEY || environment.OPENAI_API_KEY || environment.PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET) return undefined;
+  return join(environment.CODEX_HOME?.trim() || join(environment.HOME?.trim() || homedir(), ".codex"), "auth.json");
 }
 
 /** Stage one explicit Codex authentication source in its isolated runtime home. */

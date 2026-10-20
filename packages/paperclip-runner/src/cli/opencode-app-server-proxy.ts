@@ -79,8 +79,8 @@ function text(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
-function runtimeDirectory(): string {
-  const configured = process.env.PAPERCLIP_OPENCODE_RUNTIME_DIR?.trim();
+function runtimeDirectory(params: Record<string, unknown>): string {
+  const configured = text(params.runtimeDirectory, process.env.PAPERCLIP_OPENCODE_RUNTIME_DIR ?? "").trim();
   if (!configured)
     throw new Error("PAPERCLIP_OPENCODE_RUNTIME_DIR is required");
   return resolve(configured);
@@ -104,7 +104,9 @@ async function open(
     : [];
   const runtimeContextPath =
     process.env.PAPERCLIP_NATIVE_RUNTIME_CONTEXT_PATH?.trim();
-  const runtimeContext = runtimeContextPath
+  const runtimeContext = Object.hasOwn(params, "runtimeContext")
+    ? (params.runtimeContext === null ? null : parseNativeRuntimeContext(params.runtimeContext))
+    : runtimeContextPath
     ? parseNativeRuntimeContext(
         JSON.parse(readFileSync(runtimeContextPath, "utf8")),
       )
@@ -112,12 +114,12 @@ async function open(
   driver = new OpenCodeServerDriver({
     model,
     permissionMode: parseOpenCodeProxyPermissionMode(
-      process.env.PAPERCLIP_OPENCODE_PERMISSION_MODE,
+      Object.hasOwn(params, "permissionMode") ? String(params.permissionMode) : process.env.PAPERCLIP_OPENCODE_PERMISSION_MODE,
     ),
     command: launchBinding.command,
     commandFd: launchBinding.commandFd,
     commandLifecycle: launchBinding.commandLifecycle,
-    runtimeDirectory: runtimeDirectory(),
+    runtimeDirectory: runtimeDirectory(params),
     environment: withoutAmbientOpenCodeCommand(process.env),
     runnerInstanceId:
       process.env.PAPERCLIP_RUNNER_INSTANCE_ID ?? "paperclip-runnerd-opencode",
