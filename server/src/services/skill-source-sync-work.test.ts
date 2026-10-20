@@ -223,7 +223,7 @@ describe.skipIf(!support.supported)('skill source committed work and deadlines',
     const ready = new Promise<void>(resolve => { reading = resolve; });
     const response = new Promise<never>((_, reject) => { rejectRead = reject; });
     const refresh = skillSourceService(db).refresh(companyId, row.id, {
-      ...context, read: () => (async () => { reading(); return response; }) as ReturnType<SkillSourceContext['read']>,
+      ...context, read: () => Object.assign(async () => { reading(); return response; }, { openSnapshot: context.read(null).openSnapshot }),
     });
     const rejected = expect(refresh).rejects.toThrow('provider unavailable');
     await ready; await settle();

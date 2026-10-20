@@ -3118,3 +3118,10 @@ These deadlines are not yet covered by the Paperclip Cloud scheduled-wake contra
 The sleep-safety report retains the instance while an active company has pending
 imports or eligible automatic refreshes. Removing the five-second discovery poll
 establishes worker quiet; it does not establish host or database suspension.
+
+The targeted suites also accept external PostgreSQL when embedded PostgreSQL is
+unavailable. Use a separate, disposable database for each variable:
+`PAPERCLIP_SKILL_SYNC_TEST_DATABASE_URL`,
+`PAPERCLIP_PROJECT_SKILLS_TEST_DATABASE_URL`, and
+`PAPERCLIP_SKILL_SOURCES_TEST_DATABASE_URL`. The suites apply migrations and create
+test data; the synchronization suite truncates company data between tests.
